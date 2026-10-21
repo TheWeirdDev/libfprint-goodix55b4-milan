@@ -1,0 +1,6 @@
+/.build/
+/packaging/arch/src/
+/packaging/arch/pkg/
+/packaging/arch/libfprint/
+/packaging/arch/*.pkg.tar.*
+__pycache__/
