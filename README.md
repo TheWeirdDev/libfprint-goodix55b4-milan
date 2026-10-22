@@ -43,6 +43,43 @@ sensor's existing PSK, so Windows will no longer pair with it.**
 Requires `python-pyusb` and `python-cryptography`. The script is the same
 tool used to record the evaluation dataset.
 
+### Flashing firmware 10041
+
+The command above only works if the sensor already runs
+`GF3268_RTSEC_APP_10041`. For a sensor with other firmware, or if you are not
+sure, use `run_55b4.py` from
+[goodix-fp-dump](https://github.com/mpi3d/goodix-fp-dump). It flashes 10041
+when needed and writes the zero PSK. On a sensor that already runs 10041 it
+only writes the PSK. Adapted from
+[d-k-bo's guide](https://gist.github.com/d-k-bo/15e53eab53e2845e97746f5f8661b224).
+
+> [!WARNING]
+> Flashing can break the sensor. Everything here is at your own risk. Read
+> the script before running it.
+>
+> - Run it by hand, once. Never run it at startup or on a schedule: flashing
+>   the sensor too often breaks it.
+> - If you dual-boot, disable the Windows fingerprint driver completely.
+>   Otherwise Windows reflashes the sensor and pairs it with a new PSK.
+
+    sudo pacman -S --needed git python openssl
+    git clone --recurse-submodules https://github.com/mpi3d/goodix-fp-dump.git
+    git -C goodix-fp-dump checkout cc43bb3b3154a0bccc0412ae024013c7e1923139
+    python -m venv goodix-fp-dump/.venv
+    goodix-fp-dump/.venv/bin/pip install -r goodix-fp-dump/requirements.txt
+    sudo systemctl stop fprintd
+    cd goodix-fp-dump
+    sudo .venv/bin/python run_55b4.py
+
+The tested commit is pinned above. The venv is needed because some of the
+tool's dependencies (`python-periphery`, `spidev`) are not in the Arch repos.
+The script runs `openssl s_server` for the TLS session it uses to read
+the image. The script prints a warning and
+asks you to type a number to continue. It then prints the firmware and PSK
+status, flashes if needed, and waits for a finger. It saves the image as
+`fingerprint.pgm`, which should look like a fingerprint. Then restart fprintd
+(`sudo systemctl start fprintd`) and enroll.
+
 ## Build and test without installing
 
     scripts/build-local.sh
