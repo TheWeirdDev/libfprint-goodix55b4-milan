@@ -21,6 +21,7 @@
 #include "goodix55b4.h"
 #include "goodix55b4-calib.h"
 #include "goodix55b4-state.h"
+#include "goodix55b4-study.h"
 #include "milan/match/match.h"
 #include "milan/print.h"
 #include "milan/runtime.h"
@@ -32,6 +33,9 @@
  * (milan-port N3). Override the directory with GOODIX55B4_STATE_DIR. */
 #define GOODIX55B4_STATE_DIR_DEFAULT "/var/lib/fprint/goodix55b4"
 #define GOODIX55B4_STATE_FILE "engine-state.bin"
+/* Studied templates (goodix55b4-study.h); GOODIX55B4_NO_STUDY=1 matches
+ * against the enrolled templates only and learns nothing. */
+#define GOODIX55B4_STUDY_SUBDIR "studied"
 
 struct _FpiDeviceGoodix55b4
 {
@@ -60,6 +64,7 @@ struct _FpiDeviceGoodix55b4
   guint                 enroll_bad_records;
   guint                 enroll_bad_continue;
   GPtrArray            *gallery_prints; /* FpPrint per gallery index (identify) */
+  GPtrArray            *gallery_keys;   /* study key per gallery index, or NULL */
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceGoodix55b4, fpi_device_goodix55b4, FPI,
@@ -510,6 +515,18 @@ engine_state_save (FpiDeviceGoodix55b4 *self)
       !goodix55b4_state_save (self->engine, self->state_path,
                               GOODIX55B4_SENSOR_SUBTYPE, &error))
     fp_warn ("cannot save engine state: %s", error->message);
+}
+
+static gboolean
+study_enabled (void)
+{
+  return g_strcmp0 (g_getenv ("GOODIX55B4_NO_STUDY"), "1") != 0;
+}
+
+static gchar *
+study_dir (void)
+{
+  return g_build_filename (state_dir (), GOODIX55B4_STUDY_SUBDIR, NULL);
 }
 
 static void
@@ -1093,6 +1110,31 @@ print_template (FpPrint *print)
   return tpl;
 }
 
+/* Keep the winner template with this probe studied into it, so the print
+ * follows the finger over time (e.g. damp skin after washing). Stock
+ * fprintd cannot store an updated print, hence the driver-side store. */
+static void
+study_store (const GoodixMilanRuntimeOutput *out, GPtrArray *keys)
+{
+  g_autoptr(GError) error = NULL;
+  g_autofree gchar *dir = NULL;
+  const char *key;
+
+  if (out->learning_error)
+    fp_dbg ("study: %s", out->learning_error->message);
+  if (!out->final_candidate || !keys || out->winner_index >= keys->len)
+    return;
+  key = g_ptr_array_index (keys, out->winner_index);
+  if (!key)
+    return;
+  dir = study_dir ();
+  if (!goodix55b4_study_save (dir, key, out->final_candidate, &error))
+    fp_warn ("cannot save studied template: %s", error->message);
+  else
+    fp_dbg ("study: action %d, template now %u features",
+            (int) out->study_action, out->final_candidate_info.feature_count);
+}
+
 static void
 match_engine_done (FpDevice *dev, GoodixMilanRuntimeOutput *out, GError *error)
 {
@@ -1100,6 +1142,7 @@ match_engine_done (FpDevice *dev, GoodixMilanRuntimeOutput *out, GError *error)
   gboolean identify = fpi_device_get_current_action (dev) ==
                       FPI_DEVICE_ACTION_IDENTIFY;
   g_autoptr(GPtrArray) prints = g_steal_pointer (&self->gallery_prints);
+  g_autoptr(GPtrArray) keys = g_steal_pointer (&self->gallery_keys);
 
   if (!error && out->status == GOODIX_MILAN_RUNTIME_CANCELLED)
     error = cancelled_error ();
@@ -1113,6 +1156,9 @@ match_engine_done (FpDevice *dev, GoodixMilanRuntimeOutput *out, GError *error)
       fpi_device_action_error (dev, error);
       return;
     }
+
+  if (out->status == GOODIX_MILAN_RUNTIME_MATCH)
+    study_store (out, keys);
 
   if (out->status == GOODIX_MILAN_RUNTIME_RETRY)
     {
@@ -1135,8 +1181,6 @@ match_engine_done (FpDevice *dev, GoodixMilanRuntimeOutput *out, GError *error)
       fpi_device_verify_report (dev, out->status == GOODIX_MILAN_RUNTIME_MATCH ?
                                 FPI_MATCH_SUCCESS : FPI_MATCH_FAIL, NULL, NULL);
     }
-  /* out->final_candidate holds the studied (learned) template. Stock
-   * libfprint/fprintd cannot store an updated print, so it is not used. */
   goodix_milan_runtime_output_free (out);
 
   if (identify)
@@ -1155,24 +1199,44 @@ match_scan_done (FpiSsm *ssm, FpDevice *dev, GError *error)
   if (error)
     {
       g_clear_pointer (&self->gallery_prints, g_ptr_array_unref);
+      g_clear_pointer (&self->gallery_keys, g_ptr_array_unref);
       fpi_device_action_error (dev, error);
       return;
     }
 
   gallery = g_ptr_array_new_with_free_func (
     (GDestroyNotify) goodix_milan_runtime_gallery_input_free);
+  g_clear_pointer (&self->gallery_keys, g_ptr_array_unref);
+  self->gallery_keys = g_ptr_array_new_with_free_func (g_free);
   for (guint i = 0; i < self->gallery_prints->len; i++)
     {
       g_autoptr(GBytes) tpl = print_template (g_ptr_array_index (self->gallery_prints, i));
+      g_autoptr(GBytes) studied = NULL;
+      gchar *key = NULL;
+
+      if (tpl && study_enabled ())
+        {
+          g_autoptr(GError) study_error = NULL;
+          g_autofree gchar *dir = study_dir ();
+
+          key = goodix55b4_study_key (tpl);
+          studied = goodix55b4_study_load (dir, key, &study_error);
+          if (!studied && !g_error_matches (study_error, G_FILE_ERROR,
+                                            G_FILE_ERROR_NOENT))
+            fp_warn ("ignoring studied template: %s", study_error->message);
+        }
+      g_ptr_array_add (self->gallery_keys, key);
 
       /* Index i keeps the winner index aligned with gallery_prints; an
        * unusable print simply never matches. */
       if (tpl)
-        g_ptr_array_add (gallery, goodix_milan_runtime_gallery_input_new (i, tpl));
+        g_ptr_array_add (gallery, goodix_milan_runtime_gallery_input_new (
+                           i, studied ? studied : tpl));
     }
   if (gallery->len == 0)
     {
       g_clear_pointer (&self->gallery_prints, g_ptr_array_unref);
+      g_clear_pointer (&self->gallery_keys, g_ptr_array_unref);
       if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_IDENTIFY)
         {
           /* Empty gallery (or only foreign prints): nothing can match. */
@@ -1285,6 +1349,7 @@ close_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
   g_clear_pointer (&self->frame, g_free);
   g_clear_pointer (&self->enroll_tx, goodix_milan_enrollment_transaction_free);
   g_clear_pointer (&self->gallery_prints, g_ptr_array_unref);
+  g_clear_pointer (&self->gallery_keys, g_ptr_array_unref);
   goodix_dev_deinit (dev, &deinit_error);
   fpi_device_close_complete (dev, deinit_error);
 }
@@ -1334,6 +1399,7 @@ dev_finalize (GObject *object)
   g_clear_pointer (&self->engine, g_free);
   g_clear_pointer (&self->enroll_tx, goodix_milan_enrollment_transaction_free);
   g_clear_pointer (&self->gallery_prints, g_ptr_array_unref);
+  g_clear_pointer (&self->gallery_keys, g_ptr_array_unref);
   G_OBJECT_CLASS (fpi_device_goodix55b4_parent_class)->finalize (object);
 }
 

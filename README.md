@@ -64,3 +64,13 @@ paths of the example programs.
 The matcher keeps preprocessing state between scans. It is stored in
 `/var/lib/fprint/goodix55b4/engine-state.bin` (override with
 `GOODIX55B4_STATE_DIR`). Deleting it hurts match rates until it is rebuilt.
+
+After each successful match the engine updates the matched template with the
+new touch (adaptive learning, as on Windows), so a print follows the finger
+over time, e.g. damp skin after washing. fprintd cannot store updated prints,
+so the driver keeps them in `/var/lib/fprint/goodix55b4/studied/`, one file per
+enrolled print, and matches against them instead of the enrolled template.
+Re-enrolling a finger starts from scratch. Deleting the directory goes back to
+the enrolled templates; `GOODIX55B4_NO_STUDY=1` turns learning off. Offline on
+the 3-finger set this raised single-attempt identify from 95% to 97% (12-touch
+enrolment) and from 78% to 88% (6 touches), with no false accepts.
