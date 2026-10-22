@@ -15,13 +15,18 @@ libfprint work (commit in `driver/goodix55b4/milan/UPSTREAM_COMMIT`). The
 ## Install (Arch Linux)
 
 The package is a drop-in replacement for `libfprint`. It builds upstream
-libfprint 1.94.10 with every normal driver plus this one.
+libfprint 1.94.10 with every normal driver plus this one. It is on the AUR as
+[`libfprint-goodix55b4`](https://aur.archlinux.org/packages/libfprint-goodix55b4):
+
+    yay -S libfprint-goodix55b4      # or paru, or any AUR helper
+    sudo systemctl restart fprintd
+    fprintd-enroll
+
+To build it from this repo instead:
 
     git clone https://github.com/TheWeirdDev/libfprint-goodix55b4-milan.git
     cd libfprint-goodix55b4-milan/packaging/arch
     makepkg -si
-    sudo systemctl restart fprintd
-    fprintd-enroll
 
 The package also installs the libfprint examples as
 `goodix55b4-{img-capture,enroll,verify,identify,manage-prints}`. Stop fprintd
