@@ -1300,6 +1300,12 @@ goodix_dev_init (FpDevice *dev, GError **error)
   priv->length = 0;
   priv->transfer_cancel_tkn = g_cancellable_new ();
 
+  /* An operation cut short (e.g. an open racing system suspend) can leave
+   * the MCU NAKing every OUT transfer, and the kernel does not reset it on
+   * resume. A port reset recovers it, as in goodixmoc/synaptics. */
+  if (!g_usb_device_reset (fpi_device_get_usb_device (dev), error))
+    return FALSE;
+
   return g_usb_device_claim_interface (fpi_device_get_usb_device (dev),
                                        class->interface, 0, error);
 }
