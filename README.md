@@ -1,10 +1,11 @@
 # libfprint-goodix55b4-milan
 
-Fingerprint driver for the **Goodix 27c6:55b4** sensor (108×88)
-for libfprint, with Goodix's Milan matcher ported to
-native C (no Windows DLL). In testing, identification succeeds on the first
+Fingerprint driver for the **Goodix 27c6:55b4** and **27c6:5584** sensors
+(108×88) for libfprint, with Goodix's Milan matcher ported to native C (no
+Windows DLL). In testing, identification succeeds on the first
 attempt 95% of the time, against 71% for the SIGFM matcher, with no false
 accepts on the test set.
+
 
 The USB/TLS protocol layer is based on the goodixtls55x4 driver. The image
 preprocessing and matching code in `driver/goodix55b4/milan/` comes from the
@@ -44,6 +45,8 @@ sensor's existing PSK, so Windows will no longer pair with it.**
 
     sudo systemctl stop fprintd
     sudo python3 tools/capture_dataset_55b4.py /tmp/out --finger test --touches 1 --write-zero-psk
+
+(It finds either `27c6:55b4` or `27c6:5584`.)
 
 Requires `python-pyusb` and `python-cryptography`. The script is the same
 tool used to record the evaluation dataset.
@@ -103,9 +106,18 @@ paths of the example programs.
 
 ## State
 
-The matcher keeps preprocessing state between scans. It is stored in
-`/var/lib/fprint/goodix55b4/engine-state.bin` (override with
-`GOODIX55B4_STATE_DIR`). Deleting it hurts match rates until it is rebuilt.
+The matcher keeps preprocessing state between scans. The 55b4 uses
+`/var/lib/fprint/goodix55b4/engine-state.bin` as before; the 5584 uses
+`engine-state-5584.bin` so a calibration from the other model can never be
+loaded (override the directory with `GOODIX55B4_STATE_DIR`).
+
+On the 5584 only a state that produced a match is saved: enrollment and failed
+probes do not overwrite it, and a failed probe within a session is rolled back
+before the next scan. This matters — restoring the state written after an
+enrollment (13 samples) or after a run of failed probes made every following
+probe score 0, while a state saved by a successful match reloads and matches
+again. Deleting the 5584 file is safe; the calibration is rebuilt from the next
+no-finger setup frames.
 
 After each successful match the engine updates the matched template with the
 new touch (adaptive learning, as on Windows), so a print follows the finger

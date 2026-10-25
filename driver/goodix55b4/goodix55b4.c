@@ -1,5 +1,5 @@
 /*
- * Goodix 27c6:55b4 driver for libfprint — native Milan matching
+ * Goodix 27c6:55b4 and 27c6:5584 driver for libfprint — native Milan matching
  *
  * Protocol layer: goodix.c / goodix_proto.c / goodixtls.c from the
  * goodixtls55x4 driver. Matching: the native Milan engine (milan/, vendored
@@ -32,7 +32,9 @@
  * restarts; without it single-attempt acceptance drops from 95% to ~70%
  * (milan-port N3). Override the directory with GOODIX55B4_STATE_DIR. */
 #define GOODIX55B4_STATE_DIR_DEFAULT "/var/lib/fprint/goodix55b4"
+/* 55b4 keeps the historical file; 5584 must not load a 55b4 state. */
 #define GOODIX55B4_STATE_FILE "engine-state.bin"
+#define GOODIX5584_STATE_FILE "engine-state-5584.bin"
 /* Studied templates (goodix55b4-study.h); GOODIX55B4_NO_STUDY=1 matches
  * against the enrolled templates only and learns nothing. */
 #define GOODIX55B4_STUDY_SUBDIR "studied"
@@ -73,7 +75,11 @@ G_DEFINE_TYPE (FpiDeviceGoodix55b4, fpi_device_goodix55b4,
                FPI_TYPE_DEVICE_GOODIXTLS);
 
 static const FpIdEntry id_table[] = {
-  {.vid = 0x27c6, .pid = 0x55b4},
+  /* 55b4 and 5584 are the same Milan die (chip ID 0x00220ca1), the same
+   * firmware and the same zero-PSK protocol; only the USB PID differs. The
+   * driver_data keeps the two models' engine state apart. */
+  {.vid = 0x27c6, .pid = 0x55b4, .driver_data = 0x55b4},
+  {.vid = 0x27c6, .pid = 0x5584, .driver_data = 0x5584},
   {.vid = 0, .pid = 0, .driver_data = 0},
 };
 
@@ -492,7 +498,11 @@ engine_state_open (FpiDeviceGoodix55b4 *self)
   g_autoptr(GError) error = NULL;
 
   g_free (self->state_path);
-  self->state_path = g_build_filename (state_dir (), GOODIX55B4_STATE_FILE, NULL);
+  self->state_path = g_build_filename (
+    state_dir (),
+    fpi_device_get_driver_data (FP_DEVICE (self)) == 0x5584
+      ? GOODIX5584_STATE_FILE : GOODIX55B4_STATE_FILE,
+    NULL);
   if (goodix55b4_state_load (self->engine, self->state_path,
                              GOODIX55B4_SENSOR_SUBTYPE, &error))
     {
@@ -840,12 +850,15 @@ typedef struct
 {
   GoodixMilanRuntimeInput *input;
   EngineDone               done;
+  Goodix55b4EngineState   *state_before; /* for a no-match rollback */
+  gboolean                 identification;
 } EngineJob;
 
 static void
 engine_job_free (EngineJob *job)
 {
   g_clear_pointer (&job->input, goodix_milan_runtime_input_free);
+  g_clear_pointer (&job->state_before, g_free);
   g_free (job);
 }
 
@@ -886,12 +899,25 @@ engine_task_done (GObject *source, GAsyncResult *res, gpointer user_data)
 
   if (out && out->action_epoch == self->epoch)
     {
-      /* Carry the engine state forward exactly as upstream device/enroll.c. */
+      /* Carry the engine state forward exactly as upstream device/enroll.c.
+       * A failed identification is not a learning sample: restore the state
+       * from before the scan, otherwise a low-quality or wrong-finger probe
+       * degrades the calibration of the retries that follow in the same
+       * session (observed on 27c6:5584: the first poor probe makes the next
+       * good ones score 0). Enrollment samples still advance the state. */
       if (out->preprocess_state_valid &&
           out->status != GOODIX_MILAN_RUNTIME_CANCELLED)
         {
-          self->engine->state = out->preprocess_state;
-          self->engine->profile = out->profile_state;
+          if (job->identification &&
+              fpi_device_get_driver_data (dev) == 0x5584 &&
+              out->status != GOODIX_MILAN_RUNTIME_MATCH &&
+              job->state_before)
+            *self->engine = *job->state_before;
+          else
+            {
+              self->engine->state = out->preprocess_state;
+              self->engine->profile = out->profile_state;
+            }
         }
       else if (out->setup_state_valid)
         {
@@ -902,7 +928,13 @@ engine_task_done (GObject *source, GAsyncResult *res, gpointer user_data)
           self->engine->profile.setup_not_ready =
             out->profile_state.setup_not_ready;
         }
-      engine_state_save (self);
+      /* On 27c6:5584 persist only a state that produced a match: the state
+       * saved after an enrollment or a failed probe poisons the next session
+       * (all valid probes then score 0), while a state saved after a match
+       * reloads and matches again. The 55b4 keeps the original behaviour. */
+      if (fpi_device_get_driver_data (dev) != 0x5584 ||
+          out->status == GOODIX_MILAN_RUNTIME_MATCH)
+        engine_state_save (self);
       fp_dbg ("engine: status %d score %d winner %d quality %d coverage %d%s%s",
               out->status, out->score,
               out->status == GOODIX_MILAN_RUNTIME_MATCH ? (int) out->winner_index : -1,
@@ -923,6 +955,9 @@ engine_run (FpDevice *dev, GoodixMilanPreprocessPurpose purpose,
 
   g_assert (self->engine_task == NULL);
   job->done = done;
+  job->identification = purpose == GOODIX_MILAN_PURPOSE_IDENTIFY;
+  if (job->identification && fpi_device_get_driver_data (dev) == 0x5584)
+    job->state_before = g_memdup2 (self->engine, sizeof (*self->engine));
   job->input = goodix_milan_runtime_input_new (
     ++self->epoch, 1, purpose, &self->engine->state, &self->engine->profile,
     self->setup, self->frame, GOODIX55B4_TCODE, GOODIX55B4_DAC_HIGH,
@@ -1416,7 +1451,7 @@ fpi_device_goodix55b4_class_init (FpiDeviceGoodix55b4Class *klass)
   gx_class->ep_out = GOODIX55B4_EP_OUT;
 
   dev_class->id = "goodix55b4";
-  dev_class->full_name = "Goodix 55b4 Fingerprint Sensor (Milan)";
+  dev_class->full_name = "Goodix 55x4 Fingerprint Sensor (Milan)";
   dev_class->type = FP_DEVICE_TYPE_USB;
   dev_class->scan_type = FP_SCAN_TYPE_PRESS;
   dev_class->id_table = id_table;
