@@ -106,18 +106,10 @@ paths of the example programs.
 
 ## State
 
-The matcher keeps preprocessing state between scans. The 55b4 uses
-`/var/lib/fprint/goodix55b4/engine-state.bin` as before; the 5584 uses
-`engine-state-5584.bin` so a calibration from the other model can never be
-loaded (override the directory with `GOODIX55B4_STATE_DIR`).
+The matcher keeps preprocessing state between scans. It is stored in
+`/var/lib/fprint/goodix55b4/engine-state.bin` (override with
+`GOODIX55B4_STATE_DIR`). Deleting it hurts match rates until it is rebuilt.
 
-On the 5584 only a state that produced a match is saved: enrollment and failed
-probes do not overwrite it, and a failed probe within a session is rolled back
-before the next scan. This matters — restoring the state written after an
-enrollment (13 samples) or after a run of failed probes made every following
-probe score 0, while a state saved by a successful match reloads and matches
-again. Deleting the 5584 file is safe; the calibration is rebuilt from the next
-no-finger setup frames.
 
 After each successful match the engine updates the matched template with the
 new touch (adaptive learning, as on Windows), so a print follows the finger
