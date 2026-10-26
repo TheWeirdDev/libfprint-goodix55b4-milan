@@ -1,6 +1,12 @@
-# Build the Arch package from packaging/arch/PKGBUILD (the same one published
-# on the AUR) for each pushed release tag, and attach it to a GitHub release.
-name: Release Arch package
+# Build the packages for each pushed release tag and attach them to a GitHub
+# release: Arch (packaging/arch/PKGBUILD, the same one published on the
+# AUR), Debian/Ubuntu (.deb) and Fedora (.rpm), each in a container of the
+# release it is for.
+#
+# A manual run with an empty tag only builds the selected branch, so the
+# packaging can be tested before tagging; nothing is published. (The Arch
+# package still fetches the driver at the tag named by pkgver.)
+name: Release packages
 
 on:
   push:
@@ -8,46 +14,44 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to (re)build, e.g. v1.94.10.m4
-        required: true
+        description: Existing tag to (re)build, e.g. v1.94.100.m1; empty = build this branch only
+        required: false
+        default: ''
 
 permissions:
   contents: write
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    container: archlinux:base-devel
-    env:
-      TAG: ${{ inputs.tag || github.ref_name }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Install git and gh
-        run: pacman -Syu --noconfirm --needed git github-cli
+env:
+  TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  # Checked-out ref: the tag, or the branch the manual run was started on.
+  REF: ${{ github.event_name == 'push' && github.ref_name || inputs.tag || github.ref }}
 
+jobs:
+  notes:
+    runs-on: ubuntu-latest
+    steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.REF }}
           fetch-depth: 0
 
       # From the commit this workflow runs from (the tag on a push, the
       # default branch on a manual rebuild), so older tags get notes too.
       - name: Extract release notes from CHANGELOG.md
+        if: env.TAG != ''
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git show "$GITHUB_SHA:CHANGELOG.md" |
             awk -v tag="$TAG" '
               $0 ~ "^## " { if (found) exit; found = ($2 == tag) ; next }
-              found' > "$RUNNER_TEMP/notes.md"
-          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+              found' > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
             echo "::error::CHANGELOG.md has no section for $TAG"
             exit 1
           fi
-          cat "$RUNNER_TEMP/notes.md"
+          cat notes.md
 
       - name: Check the tag matches pkgver
+        if: env.TAG != ''
         working-directory: packaging/arch
         run: |
           source ./PKGBUILD
@@ -56,14 +60,35 @@ jobs:
             exit 1
           fi
 
+      - uses: actions/upload-artifact@v4
+        if: env.TAG != ''
+        with:
+          name: notes
+          path: notes.md
+
+  arch:
+    needs: notes
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install git
+        run: pacman -Syu --noconfirm --needed git
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.REF }}
+
       - name: Install build dependencies
         working-directory: packaging/arch
         run: |
           source ./PKGBUILD
-          pacman -S --noconfirm --needed "${depends[@]}" "${makedepends[@]}"
+          pacman -S --noconfirm --needed "${depends[@]}" "${makedepends[@]}" "${checkdepends[@]}"
 
       # makepkg refuses to run as root. The PKGBUILD fetches the driver at
-      # this same tag from GitHub, exactly as an AUR build does.
+      # the tag named by pkgver from GitHub, exactly as an AUR build does.
       - name: Build package
         run: |
           useradd -m builder
@@ -75,8 +100,104 @@ jobs:
           sudo -u builder PKGEXT=.pkg.tar.zst makepkg --noconfirm
           mkdir "$GITHUB_WORKSPACE/out"
           cp ./*.pkg.tar.zst "$GITHUB_WORKSPACE/out/"
-          cd "$GITHUB_WORKSPACE/out"
-          sha256sum ./*.pkg.tar.zst > SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-arch
+          path: out/*
+          if-no-files-found: error
+
+  deb:
+    needs: notes
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: debian12, image: 'debian:12' }
+          - { name: debian13, image: 'debian:13' }
+          - { name: ubuntu24.04, image: 'ubuntu:24.04' }
+          - { name: ubuntu26.04, image: 'ubuntu:26.04' }
+    container: ${{ matrix.image }}
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install git
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.REF }}
+
+      - name: Install build dependencies
+        run: apt-get install -y --no-install-recommends $(grep -v '^#' packaging/debian/build-deps)
+
+      - name: Build package
+        run: packaging/debian/build-deb.sh out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.name }}
+          path: out/*.deb
+          if-no-files-found: error
+
+  rpm:
+    needs: notes
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: fedora43, image: 'fedora:43' }
+          - { name: fedora44, image: 'fedora:44' }
+    container: ${{ matrix.image }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install git and rpm-build
+        run: dnf -y install git rpm-build 'dnf-command(builddep)'
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.REF }}
+
+      - name: Install build dependencies
+        run: dnf -y builddep packaging/fedora/libfprint-goodix55b4.spec
+
+      - name: Build package
+        run: packaging/fedora/build-rpm.sh out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.name }}
+          path: out/*.rpm
+          if-no-files-found: error
+
+  release:
+    needs: [notes, arch, deb, rpm]
+    if: github.event_name == 'push' || inputs.tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: out
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: notes
+
+      - name: Checksums
+        working-directory: out
+        run: |
+          sha256sum ./* > SHA256SUMS
           cat SHA256SUMS
 
       - name: Publish release
@@ -84,15 +205,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
-          notes="$RUNNER_TEMP/notes.md"
-          cat >> "$notes" <<EOF
+          cat >> notes.md <<'EOF'
 
           ---
-          Install: \`sudo pacman -U libfprint-goodix55b4-*.pkg.tar.zst\`, or from the AUR: \`libfprint-goodix55b4\`.
+          Install (all packages replace the distribution's libfprint; fprintd keeps working):
+          - Arch: `yay -S libfprint-goodix55b4` (AUR), or `sudo pacman -U libfprint-goodix55b4-*.pkg.tar.zst`
+          - Debian/Ubuntu: `sudo apt install ./libfprint-goodix55b4_*_<release>_amd64.deb`, with the file for your release
+          - Fedora: `sudo dnf install --allowerasing ./libfprint-goodix55b4-*.fc<release>.x86_64.rpm`, with the file for your release
           EOF
           if gh release view "$TAG" -R "$REPO" > /dev/null 2>&1; then
             # Rebuild: replace the notes and all assets.
-            gh release edit "$TAG" -R "$REPO" --notes-file "$notes"
+            gh release edit "$TAG" -R "$REPO" --notes-file notes.md
             gh release view "$TAG" -R "$REPO" --json assets --jq '.assets[].name' |
               while read -r asset; do
                 gh release delete-asset "$TAG" "$asset" -R "$REPO" --yes
@@ -100,5 +223,5 @@ jobs:
             gh release upload "$TAG" out/* -R "$REPO"
           else
             gh release create "$TAG" out/* -R "$REPO" --title "$TAG" \
-              --notes-file "$notes"
+              --notes-file notes.md
           fi

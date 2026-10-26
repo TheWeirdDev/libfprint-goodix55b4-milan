@@ -1,0 +1,24 @@
+# Build dependencies of build-deb.sh (Debian 12+, Ubuntu 24.04+):
+#   sudo apt-get install --no-install-recommends $(grep -v '^#' packaging/debian/build-deps)
+build-essential
+ca-certificates
+dpkg-dev
+git
+meson
+ninja-build
+patchelf
+pkg-config
+python3
+gobject-introspection
+libgirepository1.0-dev
+libglib2.0-dev
+libgudev-1.0-dev
+libgusb-dev
+libdeflate-dev
+libpixman-1-dev
+libssl-dev
+# for the tests (meson test)
+libcairo2-dev
+python3-cairo
+python3-gi
+umockdev

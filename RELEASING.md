@@ -77,9 +77,16 @@ package builds from the GitHub tag, so GitHub must be done first.
    gh release view v1.94.10.m6 -R TheWeirdDev/libfprint-goodix55b4-milan
    ```
 
-   The release must have the changelog section as its notes and exactly two
-   files: `libfprint-goodix55b4-<pkgver>-1-x86_64.pkg.tar.zst` and
-   `SHA256SUMS`. If the run failed, read `gh run view <run-id> --log-failed`,
+   The release must have the changelog section as its notes and these
+   eight files:
+
+   - `libfprint-goodix55b4-<pkgver>-1-x86_64.pkg.tar.zst` (Arch)
+   - `libfprint-goodix55b4_<pkgver>-1_<release>_amd64.deb` for `debian12`,
+     `debian13`, `ubuntu24.04` and `ubuntu26.04`
+   - `libfprint-goodix55b4-<pkgver>-1.fc<NN>.x86_64.rpm` for `fc43` and `fc44`
+   - `SHA256SUMS`
+
+   The release job runs only when every build succeeded. If the run failed, read `gh run view <run-id> --log-failed`,
    fix it on `master`, and rebuild the same tag with
    `gh workflow run release.yml -R TheWeirdDev/libfprint-goodix55b4-milan -f tag=v1.94.10.m6`
    (a rebuild replaces the release's notes and files). Do not move or
@@ -88,6 +95,12 @@ package builds from the GitHub tag, so GitHub must be done first.
    The workflow builds with the same PKGBUILD the AUR uses, fetching the
    driver at the tag from GitHub, so a green run means the AUR package
    builds too.
+
+   To test packaging changes before tagging, push the branch and start a
+   build-only run (empty tag; nothing is published):
+   `gh workflow run release.yml -R TheWeirdDev/libfprint-goodix55b4-milan --ref <branch>`.
+   Locally, `packaging/debian/build-deb.sh` and `packaging/fedora/build-rpm.sh`
+   build the same packages inside a container of the target release.
 
 6. **Update the AUR package.**
 
@@ -107,15 +120,18 @@ package builds from the GitHub tag, so GitHub must be done first.
    output.
 
 7. **Report** to the maintainer: the release URL, the AUR commit, and the
-   install command:
-   `sudo pacman -U libfprint-goodix55b4-<pkgver>-1-x86_64.pkg.tar.zst`
-   (downloaded from the release) or `yay -S libfprint-goodix55b4`.
+   install commands from the release notes (`yay -S libfprint-goodix55b4`
+   on Arch; `apt install ./…deb` or `dnf install --allowerasing ./…rpm` with
+   the file from the release elsewhere).
 
 ## Notes
 
 - The workflow uses the workflow's own commit to read `CHANGELOG.md`: the
   tag on a tag push, `master` on a manual rebuild. Older tags can therefore
   be rebuilt with notes as long as `master`'s changelog has their section.
+- Tags before v1.94.100.m2 have no `packaging/debian` or
+  `packaging/fedora`, so a manual rebuild of them fails in the deb and rpm
+  jobs and publishes nothing; their releases keep the Arch package only.
 - `-debug` packages are turned off in CI (`OPTIONS+=(!debug)` in the build
   user's `~/.makepkg.conf`).
 - The workflow does not publish to the AUR; that would need the AUR SSH key

@@ -29,6 +29,41 @@ To build it from this repo instead:
     cd libfprint-goodix55b4-milan/packaging/arch
     makepkg -si
 
+## Install (Debian, Ubuntu, Fedora)
+
+Each [GitHub release](https://github.com/TheWeirdDev/libfprint-goodix55b4-milan/releases)
+has packages for Debian 12 and 13, Ubuntu 24.04 and 26.04, and Fedora 43
+and 44. Pick the file for your release. Like the Arch package, each one
+replaces the distribution's libfprint (`libfprint-2-2`, `libfprint-2-dev`,
+`gir1.2-fprint-2.0` / `libfprint`, `libfprint-devel`); fprintd keeps working.
+
+    # Debian/Ubuntu
+    sudo apt install ./libfprint-goodix55b4_1.94.100.m2-1_ubuntu24.04_amd64.deb
+    # Fedora
+    sudo dnf install --allowerasing ./libfprint-goodix55b4-1.94.100.m2-1.fc44.x86_64.rpm
+
+    sudo systemctl restart fprintd
+    fprintd-enroll
+
+On Ubuntu this also replaces Ubuntu's TOD-enabled libfprint, so
+proprietary `libfprint-2-tod1-*` drivers for other sensors stop working.
+
+To go back to the distribution's library, reinstall it (`sudo apt install
+libfprint-2-2`, or `sudo dnf swap libfprint-goodix55b4 libfprint`).
+
+To build a package yourself, run the script on the release you build for
+(it reads the versions from `packaging/arch/PKGBUILD`):
+
+    # Debian/Ubuntu
+    sudo apt install --no-install-recommends $(grep -v '^#' packaging/debian/build-deps)
+    packaging/debian/build-deb.sh          # .deb in .build/deb
+    # Fedora
+    sudo dnf install rpm-build git 'dnf-command(builddep)'
+    sudo dnf builddep packaging/fedora/libfprint-goodix55b4.spec
+    packaging/fedora/build-rpm.sh          # .rpm in .build/rpm
+
+## Notes for all packages
+
 The package also installs the libfprint examples as
 `goodix55b4-{img-capture,enroll,verify,identify,manage-prints}`. Stop fprintd
 before using them; they need root for USB access.

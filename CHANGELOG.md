@@ -3,6 +3,19 @@
 Versions are `<libfprint version>.m<n>`; each `v…` tag is built and published
 as a GitHub release with its section below as the release notes.
 
+## Unreleased
+
+- Packages for Debian 12 and 13, Ubuntu 24.04 and 26.04, and Fedora 43 and
+  44, attached to each GitHub release next to the Arch package. Built by
+  `packaging/debian/build-deb.sh` and `packaging/fedora/build-rpm.sh`
+  (spec in `packaging/fedora/`); like the Arch package they replace the
+  distribution's libfprint.
+- The release workflow builds all packages in parallel. A manual run with
+  an empty tag builds the branch without publishing.
+- All packages, Arch included, are now built like the distributions' own
+  libfprint: with `-Ddrivers=all` (adds the virtual drivers that fprintd's
+  tests use) and with upstream's test suite run during the build.
+
 ## v1.94.100.m1 - 2026-10-26
 
 - Rebased on upstream libfprint 1.94.100 (was 1.94.10). The driver itself is
