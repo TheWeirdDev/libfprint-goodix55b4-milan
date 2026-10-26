@@ -3,6 +3,32 @@
 Versions are `<libfprint version>.m<n>`; each `v…` tag is built and published
 as a GitHub release with its section below as the release notes.
 
+## v1.94.100.m3 - 2026-10-26
+
+Reliability and security fixes from a full review of the driver. Prints,
+engine state and learned templates from earlier versions keep working.
+
+- fprintd no longer hangs if the TLS handshake with the sensor stalls or
+  fails: TLS now runs without a helper thread or blocking reads, a failed
+  handshake is reported as an error, and closing the device during one is
+  safe.
+- Malformed data from the sensor is rejected instead of being read past its
+  end, and corrupted USB packets and images are detected by their checksums
+  (images are read again, up to 3 times).
+- No more 100% CPU loop when the sensor disappears (e.g. unplugged or on
+  resume): the driver stops and reports an error.
+- Operations that previously could wait forever (a busy device, an
+  unanswered finger-up detection) now end with an error.
+- Matching is smoother: the engine state and learned templates (up to
+  ~0.5 MB) are saved in the background and only when they changed, instead
+  of on fprintd's main thread after every match.
+- New `GOODIX55B4_STUDY_POLICY`: `native` (default, unchanged behaviour),
+  `bounded` (learns only from confident matches and never replaces the
+  enrolled features) or `off`. See the README for how to set it.
+- New troubleshooting switches `GOODIX55B4_LAX_CHECKSUM=1` and
+  `GOODIX55B4_TLS_CIPHERS`; TLS now offers only the suite the sensor uses.
+- Unit tests (with sanitizers) run on every push and before every release.
+
 ## v1.94.100.m2 - 2026-10-26
 
 - Packages for Debian 12 and 13, Ubuntu 24.04 and 26.04, and Fedora 43 and
