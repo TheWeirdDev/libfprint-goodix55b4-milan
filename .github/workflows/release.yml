@@ -30,6 +30,22 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      # From the commit this workflow runs from (the tag on a push, the
+      # default branch on a manual rebuild), so older tags get notes too.
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git show "$GITHUB_SHA:CHANGELOG.md" |
+            awk -v tag="$TAG" '
+              $0 ~ "^## " { if (found) exit; found = ($2 == tag) ; next }
+              found' > "$RUNNER_TEMP/notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            echo "::error::CHANGELOG.md has no section for $TAG"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/notes.md"
 
       - name: Check the tag matches pkgver
         working-directory: packaging/arch
@@ -68,9 +84,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
+          notes="$RUNNER_TEMP/notes.md"
+          cat >> "$notes" <<EOF
+
+          ---
+          Install: \`sudo pacman -U libfprint-goodix55b4-*.pkg.tar.zst\`, or from the AUR: \`libfprint-goodix55b4\`.
+          EOF
           if gh release view "$TAG" -R "$REPO" > /dev/null 2>&1; then
-            gh release upload "$TAG" out/* -R "$REPO" --clobber
+            # Rebuild: replace the notes and all assets.
+            gh release edit "$TAG" -R "$REPO" --notes-file "$notes"
+            gh release view "$TAG" -R "$REPO" --json assets --jq '.assets[].name' |
+              while read -r asset; do
+                gh release delete-asset "$TAG" "$asset" -R "$REPO" --yes
+              done
+            gh release upload "$TAG" out/* -R "$REPO"
           else
             gh release create "$TAG" out/* -R "$REPO" --title "$TAG" \
-              --notes "Arch package built from packaging/arch/PKGBUILD at $TAG. Install with \`sudo pacman -U libfprint-goodix55b4-*.pkg.tar.zst\`, or from the AUR: \`libfprint-goodix55b4\`."
+              --notes-file "$notes"
           fi
