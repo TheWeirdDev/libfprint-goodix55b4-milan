@@ -33,12 +33,17 @@ python3 -I "$ROOT/scripts/integrate.py" "$LF"
 sed -i 's/foreach driver_test: drivers_tests/foreach driver_test, _: drivers_tests/' \
     "$LF/tests/meson.build"
 
+OPTIONS=(-Ddrivers=goodix55b4 -Dudev_hwdb=disabled -Dudev_rules=disabled
+         -Dintrospection=false -Dinstalled-tests=false -Ddoc=false
+         -Dgtk-examples=false "${SANITIZE_ARGS[@]}")
 if [[ ! -d $BUILD ]]; then
-    meson setup "$BUILD" "$LF" \
-        -Ddrivers=goodix55b4 -Dudev_hwdb=disabled -Dudev_rules=disabled \
-        -Dintrospection=false -Dinstalled-tests=false -Ddoc=false \
-        -Dgtk-examples=false "${SANITIZE_ARGS[@]}"
+    meson setup "$BUILD" "$LF" "${OPTIONS[@]}"
+else
+    # Options changed in this script would otherwise never reach an
+    # existing build directory.
+    meson configure "$BUILD" "${OPTIONS[@]}"
 fi
-ninja -C "$BUILD"
+# Long build on slow machines: keep it out of the way of interactive work.
+nice ninja -C "$BUILD"
 echo "built: $BUILD/libfprint/libfprint-2.so"
 echo "examples: $BUILD/examples/{img-capture,enroll,verify,identify}"

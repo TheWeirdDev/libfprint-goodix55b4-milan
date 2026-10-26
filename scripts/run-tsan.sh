@@ -17,6 +17,12 @@ if [[ ! -d $LF_BUILD/libfprint ]]; then
     SANITIZE=1 "$ROOT/scripts/build-local.sh"
 fi
 mkdir -p "$OUT"
+# TSan aborts ("unexpected memory mapping") on kernels with high mmap
+# randomisation, e.g. the GitHub runners; run without ASLR where possible.
+NO_ASLR=()
+if command -v setarch > /dev/null && setarch "$(uname -m)" -R true 2> /dev/null; then
+    NO_ASLR=(setarch "$(uname -m)" -R)
+fi
 # Everything but the device layer, which needs libfprint internals.
 mapfile -t SRCS < <(cd "$DRV" && ls ./*.c milan/*.c milan/*/*.c |
     grep -vE '^\./(goodix|goodix55b4|goodixtls)\.c$' | sed "s|^|$DRV/|")
@@ -29,7 +35,7 @@ for suite in goodix55b4-writer goodix55b4-state; do
         -I"$LF_BUILD/libfprint" "${CFLAGS[@]}" "$ROOT/tests/test-$suite.c" \
         "${SRCS[@]}" -o "$OUT/test-$suite" -lpthread "${LIBS[@]}"
     for ((i = 1; i <= RUNS; i++)); do
-        TSAN_OPTIONS=halt_on_error=1 "$OUT/test-$suite" > "$OUT/run.log" 2>&1 || {
+        TSAN_OPTIONS=halt_on_error=1 "${NO_ASLR[@]}" "$OUT/test-$suite" > "$OUT/run.log" 2>&1 || {
             cat "$OUT/run.log"
             echo "$suite: TSan run $i failed" >&2
             exit 1
