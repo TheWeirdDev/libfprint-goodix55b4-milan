@@ -1,5 +1,5 @@
 /*
- * Goodix 27c6:55b4 driver for libfprint — native Milan matching
+ * Goodix 27c6:55b4 and 27c6:5584 driver for libfprint — native Milan matching
  *
  * Protocol layer: goodix.c / goodix_proto.c / goodixtls.c from the
  * goodixtls55x4 driver. Matching: the native Milan engine (milan/, vendored
@@ -74,7 +74,10 @@ G_DEFINE_TYPE (FpiDeviceGoodix55b4, fpi_device_goodix55b4,
                FPI_TYPE_DEVICE_GOODIXTLS);
 
 static const FpIdEntry id_table[] = {
+  /* 55b4 and 5584 are the same Milan die (chip ID 0x00220ca1), the same
+   * firmware and the same zero-PSK protocol; only the USB PID differs. */
   {.vid = 0x27c6, .pid = 0x55b4},
+  {.vid = 0x27c6, .pid = 0x5584},
   {.vid = 0, .pid = 0, .driver_data = 0},
 };
 
@@ -1473,7 +1476,7 @@ fpi_device_goodix55b4_class_init (FpiDeviceGoodix55b4Class *klass)
   gx_class->ep_out = GOODIX55B4_EP_OUT;
 
   dev_class->id = "goodix55b4";
-  dev_class->full_name = "Goodix 55b4 Fingerprint Sensor (Milan)";
+  dev_class->full_name = "Goodix 55x4 Fingerprint Sensor (Milan)";
   dev_class->type = FP_DEVICE_TYPE_USB;
   dev_class->scan_type = FP_SCAN_TYPE_PRESS;
   dev_class->id_table = id_table;

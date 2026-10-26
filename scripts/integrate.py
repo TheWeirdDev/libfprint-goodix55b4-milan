@@ -71,25 +71,29 @@ def main():
         return t
     edit(p, top)
 
-    # The device is no longer "unsupported"
+    # The devices are no longer "unsupported"
     p = os.path.join(lf, "libfprint", "fprint-list-udev-hwdb.c")
-    edit(p, lambda t: re.sub(r"\n\s*\{ \.vid = 0x27c6, \.pid = 0x55b4 \},", "", t))
+    edit(p, lambda t: re.sub(
+        r"\n\s*\{ \.vid = 0x27c6, \.pid = 0x(?:55b4|5584) \},", "", t))
 
     p = os.path.join(lf, "data", "autosuspend.hwdb")
 
     def hwdb(t):
-        block = ("# Supported by libfprint driver %s\nusb:v27C6p55B4*\n"
-                 " ID_AUTOSUSPEND=1\n ID_PERSIST=0\n\n" % DRIVER)
-        # Drop 55B4 from the unsupported list only (not from our own block).
-        head, ours, tail = t.partition(block)
-        t = (re.sub(r"\nusb:v27C6p55B4\*", "", head) + ours +
-             re.sub(r"\nusb:v27C6p55B4\*", "", tail))
-        if block not in t:
-            anchor = "# Supported by libfprint driver goodixmoc\n"
-            if anchor not in t:
-                sys.exit("%s: anchor not found" % p)
-            t = t.replace(anchor, block + anchor, 1)
-        return t
+        # Generator format: all matching USB lines, then one key block.
+        supported = ("# Supported by libfprint driver %s\n"
+                     "usb:v27C6p55B4*\n"
+                     "usb:v27C6p5584*\n"
+                     " ID_AUTOSUSPEND=1\n ID_PERSIST=0\n\n" % DRIVER)
+        # Drop our block (any earlier layout) and both PIDs from the
+        # unsupported lists, then insert the current block once.
+        t = re.sub(r"# Supported by libfprint driver %s\n" % DRIVER +
+                   r"(?:usb:v27C6p(?:55B4|5584)\*\n)*"
+                   r"(?: ID_AUTOSUSPEND=1\n ID_PERSIST=0\n\n)?", "", t)
+        t = re.sub(r"\nusb:v27C6p(?:55B4|5584)\*", "", t)
+        anchor = "# Supported by libfprint driver goodixmoc\n"
+        if anchor not in t:
+            sys.exit("%s: anchor not found" % p)
+        return t.replace(anchor, supported + anchor, 1)
     edit(p, hwdb)
 
 

@@ -1,5 +1,5 @@
 /*
- * Goodix 27c6:55b4 driver for libfprint — native Milan matching
+ * Goodix 27c6:55b4 / 27c6:5584 driver for libfprint — native Milan matching
  *
  * Copyright (C) 2021 Alireza S.N. <alireza6677@gmail.com>
  *
@@ -23,8 +23,9 @@
 #define GOODIX55B4_PSK_FLAGS (0xbb020007)
 #define GOODIX55B4_RESET_NUMBER (1024)
 /* Chip-ID register 0, decoded b0*0x100 + b1 + b2*0x1000000 + b3*0x10000.
- * 55b4 reads 0x00220ca1: the same Milan die as the Dell 53x5 readers, which
- * the vendored engine supports as profile 9 / sensor subtype 12. */
+ * Both 55b4 and 5584 read 0x00220ca1: the same Milan die as the Dell 53x5
+ * readers, which the vendored engine supports as profile 9 / sensor subtype
+ * 12. */
 #define GOODIX55B4_CHIP_FAMILY_MASK (0xffffff00u)
 #define GOODIX55B4_CHIP_FAMILY (0x00220c00u)
 #define GOODIX55B4_SENSOR_SUBTYPE (12)

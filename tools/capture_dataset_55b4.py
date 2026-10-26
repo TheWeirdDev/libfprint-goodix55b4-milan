@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture a raw-frame test set from a Goodix 27c6:55b4 (zero PSK) for milan-cli.
+"""Capture a raw-frame test set from a Goodix 27c6:55b4/5584 (zero PSK) for milan-cli.
 
 Based on goodix_55b4_nofw_0psk.py, but headless, and it never changes the PSK
 unless --write-zero-psk is given. Finger detection uses the dynamic FDT rules
@@ -34,7 +34,7 @@ import usb.util
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gx_tls import PskServer, TlsError  # noqa: E402
 
-VID, PID = 0x27C6, 0x55B4
+VID, PIDS = 0x27C6, (0x55B4, 0x5584)
 ROWS, COLS = 88, 108
 PIXELS = ROWS * COLS
 IMAGE_BYTES = PIXELS // 4 * 6 + 4  # packed 12-bit + 4-byte checksum = 14260
@@ -61,20 +61,28 @@ CMD_FDT_DOWN, CMD_FDT_UP, CMD_FDT_MODE = 0x32, 0x34, 0x36
 OP_FDT_DOWN, OP_FDT_UP, OP_FDT_MODE = 0x0C, 0x0E, 0x0D
 
 
+def find_sensor():
+    for pid in PIDS:
+        dev = usb.core.find(idVendor=VID, idProduct=pid)
+        if dev is not None:
+            return dev
+    return None
+
+
 class Device:
     def __init__(self, events, usb_reset=True):
         self.events = events
-        self.dev = usb.core.find(idVendor=VID, idProduct=PID)
+        self.dev = find_sensor()
         if self.dev is None:
-            sys.exit("27c6:55b4 not found")
+            sys.exit("27c6:55b4 or 27c6:5584 not found")
         if usb_reset:
             # Clears a wedged MCU/FDT state left by an interrupted session
             # (55a2 driver experience). The device re-enumerates; find it again.
             self.dev.reset()
             time.sleep(2)
-            self.dev = usb.core.find(idVendor=VID, idProduct=PID)
+            self.dev = find_sensor()
             if self.dev is None:
-                sys.exit("27c6:55b4 did not come back after USB reset")
+                sys.exit("27c6:55b4/5584 did not come back after USB reset")
         if self.dev.is_kernel_driver_active(0):
             self.dev.detach_kernel_driver(0)
         self.dev.set_configuration()
