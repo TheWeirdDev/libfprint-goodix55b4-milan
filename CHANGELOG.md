@@ -3,10 +3,16 @@
 Versions are `<libfprint version>.m<n>`; each `v…` tag is built and published
 as a GitHub release with its section below as the release notes.
 
-## Unreleased
+## v1.94.10.m5 - 2026-10-26
 
+- Support for the Goodix 27c6:5584 sensor: the same Milan die and protocol as
+  the 55b4, so it only needed a USB ID. `integrate.py` adds both IDs to the
+  autosuspend hwdb and drops them from libfprint's unsupported list, and
+  `tools/capture_dataset_55b4.py` finds either sensor. The device is now named
+  "Goodix 55x4 Fingerprint Sensor (Milan)". Thanks to @V-Conet (#2).
 - CI: a GitHub Actions workflow builds the Arch package for every release tag
-  and attaches it, with `SHA256SUMS`, to the GitHub release.
+  and attaches it, with `SHA256SUMS`, to the GitHub release, using this
+  changelog for the release notes.
 
 ## v1.94.10.m4 - 2026-10-26
 
