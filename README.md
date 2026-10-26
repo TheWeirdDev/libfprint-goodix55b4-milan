@@ -29,21 +29,74 @@ To build it from this repo instead:
     cd libfprint-goodix55b4-milan/packaging/arch
     makepkg -si
 
+Each GitHub release also has the prebuilt package
+(`libfprint-goodix55b4-<version>-1-x86_64.pkg.tar.zst`) for
+`sudo pacman -U`, but the AUR package is the one that updates with your
+system.
+
 ## Install (Debian, Ubuntu, Fedora)
 
-Each [GitHub release](https://github.com/TheWeirdDev/libfprint-goodix55b4-milan/releases)
-has packages for Debian 12 and 13, Ubuntu 24.04 and 26.04, and Fedora 43
-and 44. Pick the file for your release. Like the Arch package, each one
-replaces the distribution's libfprint (`libfprint-2-2`, `libfprint-2-dev`,
-`gir1.2-fprint-2.0` / `libfprint`, `libfprint-devel`); fprintd keeps working.
+Ready-made packages are attached to every
+[GitHub release](https://github.com/TheWeirdDev/libfprint-goodix55b4-milan/releases/latest).
+Like the Arch package, each one replaces the distribution's libfprint
+(`libfprint-2-2`, `libfprint-2-dev`, `gir1.2-fprint-2.0` on Debian/Ubuntu;
+`libfprint`, `libfprint-devel` on Fedora). fprintd keeps working.
+
+**1. Find the file for your release.** A package only works on the release
+it was built for, so pick the matching one (x86_64 only):
+
+| Distribution | File name ends with |
+|---|---|
+| Debian 12 (bookworm) | `_debian12_amd64.deb` |
+| Debian 13 (trixie) | `_debian13_amd64.deb` |
+| Ubuntu 24.04 LTS | `_ubuntu24.04_amd64.deb` |
+| Ubuntu 26.04 LTS | `_ubuntu26.04_amd64.deb` |
+| Fedora 43 | `.fc43.x86_64.rpm` |
+| Fedora 44 | `.fc44.x86_64.rpm` |
+
+Other releases (e.g. Ubuntu 22.04, Linux Mint, Pop!_OS) are not built; on a
+derivative, use the file of the release it is based on at your own risk,
+or build the package yourself (below).
+
+**2. Download it**, either from the
+[latest release page](https://github.com/TheWeirdDev/libfprint-goodix55b4-milan/releases/latest)
+in a browser (under "Assets", together with `SHA256SUMS`), or in a
+terminal. These commands (bash) detect your release and fetch the matching
+file of the latest release. They need `curl` (`sudo apt install curl` on
+Debian/Ubuntu if it is missing):
+
+    mkdir -p ~/goodix55b4 && cd ~/goodix55b4
+    . /etc/os-release
+    case $ID in fedora) suffix=".fc${VERSION_ID}.x86_64.rpm" ;;
+                *)      suffix="_${ID}${VERSION_ID}_amd64.deb" ;; esac
+    base=https://github.com/TheWeirdDev/libfprint-goodix55b4-milan/releases/latest/download
+    curl -fLO "$base/SHA256SUMS"
+    file=$(grep -o "libfprint-goodix55b4[^ ]*$suffix" SHA256SUMS) &&
+        curl -fLO "$base/$file" && echo "downloaded $file"
+
+If it prints nothing after `SHA256SUMS`, there is no package for your
+release.
+
+**3. Check the download** (prints `OK` for the file you have):
+
+    sha256sum --ignore-missing -c SHA256SUMS
+
+**4. Install it** from the download folder (the `./` matters):
 
     # Debian/Ubuntu
-    sudo apt install ./libfprint-goodix55b4_1.94.100.m2-1_ubuntu24.04_amd64.deb
+    sudo apt install ./libfprint-goodix55b4_*.deb
     # Fedora
-    sudo dnf install --allowerasing ./libfprint-goodix55b4-1.94.100.m2-1.fc44.x86_64.rpm
+    sudo dnf install --allowerasing ./libfprint-goodix55b4-*.rpm
+
+apt lists `libfprint-2-2` under "will be REMOVED" and dnf replaces
+`libfprint`; that is expected. Then provision the sensor if needed (see
+[Sensor provisioning](#sensor-provisioning-one-time)) and enroll:
 
     sudo systemctl restart fprintd
     fprintd-enroll
+
+To update, repeat steps 2–4 with a newer release. The packages do not
+update themselves through apt or dnf.
 
 On Ubuntu this also replaces Ubuntu's TOD-enabled libfprint, so
 proprietary `libfprint-2-tod1-*` drivers for other sensors stop working.
