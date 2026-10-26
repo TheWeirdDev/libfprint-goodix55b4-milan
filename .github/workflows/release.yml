@@ -51,6 +51,8 @@ jobs:
       - name: Build package
         run: |
           useradd -m builder
+          # No -debug split package (the image's makepkg.conf enables it).
+          echo 'OPTIONS+=(!debug)' > /home/builder/.makepkg.conf
           cp -r packaging/arch /home/builder/build
           chown -R builder: /home/builder/build
           cd /home/builder/build
