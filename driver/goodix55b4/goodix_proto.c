@@ -229,3 +229,70 @@ goodix_pack_reader_next (GoodixPackReader *reader, guint8 *flags,
                              sizeof (GoodixPack) + sizeof (guint8) + *payload_len);
   return GOODIX_PACK_READY;
 }
+
+GoodixPskReadStatus
+goodix_parse_preset_psk_read (const guint8 *data, gsize length, guint32 *flags,
+                              const guint8 **psk, guint32 *psk_len)
+{
+  GoodixPresetPskReadReply reply;
+
+  if (!data || length < 1)
+    return GOODIX_PSK_READ_INVALID;
+  if (data[0] != 0x00)
+    return GOODIX_PSK_READ_FAILED;
+  if (length < sizeof (reply))
+    return GOODIX_PSK_READ_INVALID;
+  memcpy (&reply, data, sizeof (reply));
+  *flags = GUINT32_FROM_LE (reply.flags);
+  *psk_len = GUINT32_FROM_LE (reply.length);
+  if (*psk_len != length - sizeof (reply))
+    return GOODIX_PSK_READ_INVALID;
+  *psk = data + sizeof (reply);
+  return GOODIX_PSK_READ_OK;
+}
+
+static guint32 crc32_mpeg2_table[256];
+
+static void
+crc32_mpeg2_init (void)
+{
+  for (guint32 i = 0; i < 256; i++)
+    {
+      guint32 crc = i << 24;
+
+      for (int b = 0; b < 8; b++)
+        crc = (crc & 0x80000000u) ? (crc << 1) ^ 0x04c11db7u : crc << 1;
+      crc32_mpeg2_table[i] = crc;
+    }
+}
+
+guint32
+goodix_crc32_mpeg2 (const guint8 *data, gsize length)
+{
+  static gsize table_ready = 0;
+  guint32 crc = 0xffffffffu;
+
+  if (g_once_init_enter (&table_ready))
+    {
+      crc32_mpeg2_init ();
+      g_once_init_leave (&table_ready, 1);
+    }
+  for (gsize i = 0; i < length; i++)
+    crc = (crc << 8) ^ crc32_mpeg2_table[(crc >> 24) ^ data[i]];
+  return crc;
+}
+
+GoodixImageCrcStatus
+goodix_image_check_crc (const guint8 *data, gsize length, gsize packed_length)
+{
+  const guint8 *t;
+  guint32 stored;
+
+  if (!data || length < packed_length + 4)
+    return GOODIX_IMAGE_CRC_ABSENT;
+  t = data + packed_length;
+  stored = ((guint32) t[2] << 24) | ((guint32) t[3] << 16) |
+           ((guint32) t[0] << 8) | t[1];
+  return stored == goodix_crc32_mpeg2 (data, packed_length) ?
+         GOODIX_IMAGE_CRC_OK : GOODIX_IMAGE_CRC_MISMATCH;
+}

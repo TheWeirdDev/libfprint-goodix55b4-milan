@@ -239,3 +239,16 @@ fprintd does not see your shell's environment; set it with
 Switching policy keeps the learned templates; delete
 `/var/lib/fprint/goodix55b4/studied/` to start the new policy from the enrolled
 prints.
+
+## Troubleshooting switches
+
+Set like `GOODIX55B4_STUDY_POLICY` above (for fprintd, with
+`sudo systemctl edit fprintd`). Both are logged as warnings when active.
+
+- `GOODIX55B4_LAX_CHECKSUM=1`: accept USB packs with a bad header checksum and
+  images whose CRC does not match. By default such data is dropped (packs) or
+  read again (images, up to 3 times), as all known firmware sets both.
+- `GOODIX55B4_TLS_CIPHERS=<OpenSSL cipher string>`: the TLS suites offered to
+  the sensor. The default is the one the 55b4/5584 firmware uses,
+  `PSK-AES128-CBC-SHA256`; if a firmware fails the handshake with
+  "no shared cipher", try `PSK`.

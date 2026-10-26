@@ -355,6 +355,101 @@ test_reader_header_split_before_checksum (void)
   goodix_pack_reader_clear (&r);
 }
 
+/* ---- 0xe4 preset PSK read reply ---- */
+
+static void
+test_psk_read_reply (void)
+{
+  /* status 00 | flags 07 00 02 bb | length 03 00 00 00 | psk aa bb cc */
+  static const guint8 ok[] = { 0x00, 0x07, 0x00, 0x02, 0xbb, 0x03, 0x00, 0x00,
+                               0x00, 0xaa, 0xbb, 0xcc };
+  static const guint8 failed[] = { 0x01 };
+  guint8 bad[sizeof (ok)];
+  const guint8 *psk = NULL;
+  guint32 flags = 0, psk_len = 0;
+
+  g_assert_cmpint (goodix_parse_preset_psk_read (ok, sizeof (ok), &flags, &psk,
+                                                 &psk_len), ==, GOODIX_PSK_READ_OK);
+  g_assert_cmphex (flags, ==, 0xbb020007);
+  g_assert_cmpmem (psk, psk_len, ok + 9, 3);
+
+  /* A 3-byte PSK was rejected by the old 13-byte header check. */
+  g_assert_cmpuint (sizeof (ok), <, 13);
+
+  g_assert_cmpint (goodix_parse_preset_psk_read (failed, sizeof (failed), &flags,
+                                                 &psk, &psk_len), ==,
+                   GOODIX_PSK_READ_FAILED);
+  g_assert_cmpint (goodix_parse_preset_psk_read (ok, 0, &flags, &psk, &psk_len),
+                   ==, GOODIX_PSK_READ_INVALID);
+  g_assert_cmpint (goodix_parse_preset_psk_read (ok, 8, &flags, &psk, &psk_len),
+                   ==, GOODIX_PSK_READ_INVALID);
+  /* Length field disagreeing with the reply. */
+  memcpy (bad, ok, sizeof (ok));
+  bad[5] = 0x04;
+  g_assert_cmpint (goodix_parse_preset_psk_read (bad, sizeof (bad), &flags, &psk,
+                                                 &psk_len), ==,
+                   GOODIX_PSK_READ_INVALID);
+  bad[5] = 0xff;
+  bad[8] = 0xff; /* huge: must not wrap */
+  g_assert_cmpint (goodix_parse_preset_psk_read (bad, sizeof (bad), &flags, &psk,
+                                                 &psk_len), ==,
+                   GOODIX_PSK_READ_INVALID);
+}
+
+/* ---- image CRC ---- */
+
+#define PACKED (108 * 88 / 4 * 6)
+
+static void
+test_crc32_mpeg2 (void)
+{
+  /* The CRC-32/MPEG-2 check value. */
+  g_assert_cmphex (goodix_crc32_mpeg2 ((const guint8 *) "123456789", 9), ==,
+                   0x0376e6e7);
+  g_assert_cmphex (goodix_crc32_mpeg2 (NULL, 0), ==, 0xffffffff);
+}
+
+static void
+test_image_crc (void)
+{
+  g_autofree guint8 *img = g_malloc (PACKED + 4);
+  guint32 crc;
+
+  for (guint i = 0; i < PACKED; i++)
+    img[i] = (guint8) (i * 131 + 17);
+  crc = goodix_crc32_mpeg2 (img, PACKED);
+  /* As sent by the sensor: crc 9e30b1d1 arrives as b1 d1 9e 30. */
+  img[PACKED + 0] = crc >> 8;
+  img[PACKED + 1] = crc;
+  img[PACKED + 2] = crc >> 24;
+  img[PACKED + 3] = crc >> 16;
+  g_assert_cmpint (goodix_image_check_crc (img, PACKED + 4, PACKED), ==,
+                   GOODIX_IMAGE_CRC_OK);
+
+  /* No trailer: accepted by the caller as before. */
+  g_assert_cmpint (goodix_image_check_crc (img, PACKED, PACKED), ==,
+                   GOODIX_IMAGE_CRC_ABSENT);
+  g_assert_cmpint (goodix_image_check_crc (img, PACKED + 3, PACKED), ==,
+                   GOODIX_IMAGE_CRC_ABSENT);
+
+  /* One flipped bit in the pixels or the trailer. */
+  img[1234] ^= 0x01;
+  g_assert_cmpint (goodix_image_check_crc (img, PACKED + 4, PACKED), ==,
+                   GOODIX_IMAGE_CRC_MISMATCH);
+  img[1234] ^= 0x01;
+  img[PACKED + 2] ^= 0x80;
+  g_assert_cmpint (goodix_image_check_crc (img, PACKED + 4, PACKED), ==,
+                   GOODIX_IMAGE_CRC_MISMATCH);
+
+  /* The other plausible byte orders do not pass. */
+  img[PACKED + 0] = crc;
+  img[PACKED + 1] = crc >> 8;
+  img[PACKED + 2] = crc >> 16;
+  img[PACKED + 3] = crc >> 24;
+  g_assert_cmpint (goodix_image_check_crc (img, PACKED + 4, PACKED), ==,
+                   GOODIX_IMAGE_CRC_MISMATCH);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -377,5 +472,8 @@ main (int argc, char **argv)
                    test_reader_bad_header_checksum_lax);
   g_test_add_func ("/proto/reader/header-split-before-checksum",
                    test_reader_header_split_before_checksum);
+  g_test_add_func ("/proto/psk-read-reply", test_psk_read_reply);
+  g_test_add_func ("/proto/crc32-mpeg2", test_crc32_mpeg2);
+  g_test_add_func ("/proto/image-crc", test_image_crc);
   return g_test_run ();
 }

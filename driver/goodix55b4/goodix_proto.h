@@ -151,11 +151,21 @@ typedef struct __attribute__((__packed__)) _GoodixPresetPsk {
   guint32 offset;
 } GoodixPresetPsk;
 
+/* @deprecated: wrong layout (the reply has no offset field; reading it
+ * returned PSK bytes). Use goodix_parse_preset_psk_read(). */
 typedef struct __attribute__((__packed__)) _GoodixPresetPskResp {
   guint32 flags;
   guint32 length;
   guint32 offset;
 } GoodixPresetPskResp;
+
+/* Reply to 0xe4 (preset PSK read): status byte, then this, then the PSK
+ * (or its hash) of `length` bytes. */
+typedef struct __attribute__((__packed__)) _GoodixPresetPskReadReply {
+  guint8  status;
+  guint32 flags;
+  guint32 length;
+} GoodixPresetPskReadReply;
 
 typedef struct __attribute__((__packed__)) _GoodixDefault
 {
@@ -200,6 +210,37 @@ gboolean goodix_decode_protocol (guint8   *data,
                                  guint16  *payload_len,
                                  gboolean *valid_checksum,
                                  gboolean *valid_null_checksum);
+
+typedef enum {
+  GOODIX_PSK_READ_OK,
+  GOODIX_PSK_READ_FAILED,  /* the device answered with a non-zero status */
+  GOODIX_PSK_READ_INVALID, /* malformed reply */
+} GoodixPskReadStatus;
+
+/* Parses the reply to 0xe4. On OK, *psk points into data. */
+GoodixPskReadStatus goodix_parse_preset_psk_read (const guint8  *data,
+                                                  gsize          length,
+                                                  guint32       *flags,
+                                                  const guint8 **psk,
+                                                  guint32       *psk_len);
+
+/* CRC-32/MPEG-2: poly 0x04c11db7, init 0xffffffff, not reflected, no final
+ * xor. */
+guint32 goodix_crc32_mpeg2 (const guint8 *data,
+                            gsize         length);
+
+typedef enum {
+  GOODIX_IMAGE_CRC_OK,
+  GOODIX_IMAGE_CRC_ABSENT,   /* no 4-byte trailer after the pixels */
+  GOODIX_IMAGE_CRC_MISMATCH,
+} GoodixImageCrcStatus;
+
+/* Checks a decrypted image: `packed_length` bytes of packed pixels, then
+ * their CRC-32/MPEG-2 as two big-endian 16-bit halves, low half first
+ * (found on 55b4 firmware 10041: crc 9e30b1d1 is sent b1 d1 9e 30). */
+GoodixImageCrcStatus goodix_image_check_crc (const guint8 *data,
+                                             gsize         length,
+                                             gsize         packed_length);
 
 /* Reassembles packs from the IN endpoint: a pack may span transfers and a
  * transfer may hold more than one pack. */

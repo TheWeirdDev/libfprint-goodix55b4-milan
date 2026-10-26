@@ -28,6 +28,11 @@
 /* The sensor is provisioned with the all-zero PSK. */
 #define GOODIX_TLS_PSK_LENGTH (32)
 
+/* The suite the 55b4/5584 firmware negotiates (0x00AE). The server offered
+ * every OpenSSL suite ("ALL"); GOODIX55B4_TLS_CIPHERS (an OpenSSL cipher
+ * string) overrides this for firmware that asks for another one. */
+#define GOODIX_TLS_CIPHERS "PSK-AES128-CBC-SHA256"
+
 typedef struct _GoodixTlsServer GoodixTlsServer;
 
 GoodixTlsServer *goodix_tls_server_new (GError **error);

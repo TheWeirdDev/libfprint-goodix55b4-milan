@@ -78,6 +78,7 @@ GoodixTlsServer *
 goodix_tls_server_new (GError **error)
 {
   g_autoptr(GoodixTlsServer) self = g_new0 (GoodixTlsServer, 1);
+  const char *ciphers;
 
   ERR_clear_error ();
   self->ctx = SSL_CTX_new (TLS_server_method ());
@@ -86,13 +87,17 @@ goodix_tls_server_new (GError **error)
       set_tls_error (error, "context creation", 0);
       return NULL;
     }
-  /* Same settings as the previous server: TLS 1.2 only, every cipher (the
-   * device picks its PSK suite), the all-zero PSK. */
-  SSL_CTX_set_dh_auto (self->ctx, 1);
+  /* TLS 1.2 only, the device's PSK suite only, the all-zero PSK. */
+  ciphers = g_getenv ("GOODIX55B4_TLS_CIPHERS");
+  if (ciphers && *ciphers)
+    fp_warn ("GOODIX55B4_TLS_CIPHERS=%s overrides %s", ciphers,
+             GOODIX_TLS_CIPHERS);
+  else
+    ciphers = GOODIX_TLS_CIPHERS;
   SSL_CTX_set_options (self->ctx, SSL_OP_NO_RENEGOTIATION);
   if (!SSL_CTX_set_min_proto_version (self->ctx, TLS1_2_VERSION) ||
       !SSL_CTX_set_max_proto_version (self->ctx, TLS1_2_VERSION) ||
-      !SSL_CTX_set_cipher_list (self->ctx, "ALL"))
+      !SSL_CTX_set_cipher_list (self->ctx, ciphers))
     {
       set_tls_error (error, "context setup", 0);
       return NULL;

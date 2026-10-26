@@ -193,10 +193,11 @@ void
 goodix_receive_preset_psk_read (FpDevice *dev, guint8 *data, guint16 length,
                                 gpointer user_data, GError *error)
 {
-  guint32 psk_len;
   g_autofree GoodixCallbackInfo *cb_info = user_data;
   GoodixPresetPskReadCallback callback =
     (GoodixPresetPskReadCallback) cb_info->callback;
+  const guint8 *psk = NULL;
+  guint32 flags = 0, psk_len = 0;
 
   if (error)
     {
@@ -204,48 +205,29 @@ goodix_receive_preset_psk_read (FpDevice *dev, guint8 *data, guint16 length,
       return;
     }
 
-  if (length < sizeof (guint8))
+  /* Was checked against a 13-byte header with an "offset" field the reply
+   * does not have, while the PSK was read from byte 9: a valid reply with
+   * a PSK shorter than 4 bytes was rejected. */
+  switch (goodix_parse_preset_psk_read (data, length, &flags, &psk, &psk_len))
     {
-      g_set_error (&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                   "Invalid preset PSK read reply length: %d", length);
-      callback (dev, FALSE, 0x00000000, NULL, 0, cb_info->user_data, error);
-      return;
-    }
-
-  if (data[0] != 0x00)
-    {
+    case GOODIX_PSK_READ_FAILED:
       callback (dev, FALSE, 0x00000000, NULL, 0, cb_info->user_data, NULL);
       return;
-    }
 
-  if (length < sizeof (guint8) + sizeof (GoodixPresetPsk))
-    {
+    case GOODIX_PSK_READ_INVALID:
+      fp_warn ("Preset PSK read: invalid reply (%u bytes)", length);
       g_set_error (&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
                    "Invalid preset PSK read reply length: %d", length);
       callback (dev, FALSE, 0x00000000, NULL, 0, cb_info->user_data, error);
       return;
+
+    case GOODIX_PSK_READ_OK:
+      break;
     }
 
-  GoodixPresetPskResp* resp_data = ((GoodixPresetPskResp *)(sizeof(guint8) + data));
-  fp_dbg ("preset PSK: length %u, offset %u, flags 0x%08x",
-          GUINT32_FROM_LE (resp_data->length), GUINT32_FROM_LE (resp_data->offset),
-          GUINT32_FROM_LE (resp_data->flags));
-
-  psk_len =
-      GUINT32_FROM_LE(resp_data->length);
-
-  if (length - 9 != psk_len ) {
-    fp_warn ("Preset PSK read: unexpected length %u (psk_len %u)", length, psk_len);
-    g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                "Invalid preset PSK read reply length: %d", length);
-    callback(dev, FALSE, 0x00000000, NULL, 0, cb_info->user_data, error);
-    return;
-  }
-
-  callback(dev, TRUE,
-           GUINT32_FROM_LE(resp_data->flags),
-           data + sizeof(GoodixPresetPsk)-3, psk_len,
-           cb_info->user_data, NULL);
+  fp_dbg ("preset PSK: length %u, flags 0x%08x", psk_len, flags);
+  callback (dev, TRUE, flags, (guint8 *) psk, psk_len, cb_info->user_data,
+            NULL);
 }
 
 void

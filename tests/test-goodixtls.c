@@ -27,6 +27,7 @@ typedef struct
 } Device;
 
 static guint8 device_psk_fill;
+static const char *device_ciphers = "PSK-AES128-CBC-SHA256";
 
 static unsigned int
 device_psk_cb (SSL *ssl, const char *hint, char *identity,
@@ -47,7 +48,7 @@ device_init (Device *d, guint8 psk_fill)
   g_assert_nonnull (d->ctx);
   g_assert_true (SSL_CTX_set_min_proto_version (d->ctx, TLS1_2_VERSION));
   g_assert_true (SSL_CTX_set_max_proto_version (d->ctx, TLS1_2_VERSION));
-  g_assert_true (SSL_CTX_set_cipher_list (d->ctx, "PSK-AES128-CBC-SHA256"));
+  g_assert_true (SSL_CTX_set_cipher_list (d->ctx, device_ciphers));
   SSL_CTX_set_options (d->ctx, SSL_OP_NO_EXTENDED_MASTER_SECRET |
                        SSL_OP_NO_ENCRYPT_THEN_MAC | SSL_OP_NO_TICKET);
   SSL_CTX_set_psk_client_callback (d->ctx, device_psk_cb);
@@ -360,6 +361,44 @@ test_corrupted_record (void)
   device_clear (&d);
 }
 
+/* A client offering only another suite: refused by default, accepted when
+ * GOODIX55B4_TLS_CIPHERS allows it. */
+static gboolean
+handshake_with_other_suite (void)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GoodixTlsServer) s = goodix_tls_server_new (&error);
+  g_autoptr(GBytes) hello = NULL;
+  g_autoptr(GBytes) out = NULL;
+  gboolean established, done, ok;
+  Device d;
+
+  g_assert_no_error (error);
+  device_ciphers = "PSK-AES256-CBC-SHA384";
+  device_init (&d, 0x00);
+  hello = device_step (&d, NULL, &done);
+  ok = goodix_tls_server_handshake (s, g_bytes_get_data (hello, NULL),
+                                    g_bytes_get_size (hello), &out,
+                                    &established, &error);
+  device_clear (&d);
+  device_ciphers = "PSK-AES128-CBC-SHA256";
+  return ok;
+}
+
+static void
+test_cipher_restricted (void)
+{
+  g_unsetenv ("GOODIX55B4_TLS_CIPHERS");
+  g_assert_false (handshake_with_other_suite ());
+
+  g_setenv ("GOODIX55B4_TLS_CIPHERS", "PSK-AES256-CBC-SHA384", TRUE);
+  g_test_expect_message ("libfprint-goodixtls", G_LOG_LEVEL_WARNING,
+                         "GOODIX55B4_TLS_CIPHERS=PSK-AES256-CBC-SHA384 overrides*");
+  g_assert_true (handshake_with_other_suite ());
+  g_test_assert_expected_messages ();
+  g_unsetenv ("GOODIX55B4_TLS_CIPHERS");
+}
+
 static void
 test_free_null (void)
 {
@@ -381,5 +420,6 @@ main (int argc, char **argv)
   g_test_add_func ("/goodixtls/truncated-record", test_truncated_record);
   g_test_add_func ("/goodixtls/corrupted-record", test_corrupted_record);
   g_test_add_func ("/goodixtls/free-null", test_free_null);
+  g_test_add_func ("/goodixtls/cipher-restricted", test_cipher_restricted);
   return g_test_run ();
 }

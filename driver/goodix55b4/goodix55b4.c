@@ -55,6 +55,8 @@ struct _FpiDeviceGoodix55b4
   gboolean           usb_reset_tried; /* during the current open */
   FpiSsm            *scan_ssm;
   GSource           *up_watchdog;
+  gboolean           up_forced;  /* the watchdog re-armed this finger-up wait */
+  guint              bad_images; /* consecutive image CRC mismatches */
 
   /* Milan engine. Heap-allocated: the state is ~212 KB and GObject
    * instance structs must stay below 64 KB. */
@@ -103,6 +105,52 @@ decode_frame (const guint8 *data, guint16 len, guint16 *out)
       out[p++] = (c[4] << 4) | (c[5] >> 4);
     }
   return TRUE;
+}
+
+/* Images failing their CRC are read again this many times. */
+#define GOODIX55B4_IMAGE_RETRIES (3)
+
+/* Checks the image CRC (frames were taken without it). Returns TRUE to use
+ * the frame; otherwise it has re-requested the image (jump to `retry`) or
+ * failed the state machine. */
+static gboolean
+image_crc_ok (FpiDeviceGoodix55b4 *self, FpiSsm *ssm, const guint8 *data,
+              guint16 len, int retry, const char *what)
+{
+  switch (goodix_image_check_crc (data, len, GOODIX55B4_PACKED_BYTES))
+    {
+    case GOODIX_IMAGE_CRC_OK:
+      self->bad_images = 0;
+      return TRUE;
+
+    case GOODIX_IMAGE_CRC_ABSENT:
+      fp_dbg ("%s image without CRC (%u bytes)", what, len);
+      return TRUE;
+
+    case GOODIX_IMAGE_CRC_MISMATCH:
+      break;
+    }
+
+  /* Same escape hatch as for pack checksums (goodix.c). */
+  if (g_strcmp0 (g_getenv ("GOODIX55B4_LAX_CHECKSUM"), "1") == 0)
+    {
+      fp_warn ("%s image CRC mismatch, used anyway (GOODIX55B4_LAX_CHECKSUM)",
+               what);
+      return TRUE;
+    }
+  if (++self->bad_images <= GOODIX55B4_IMAGE_RETRIES)
+    {
+      fp_warn ("%s image CRC mismatch, reading it again (%u/%d)", what,
+               self->bad_images, GOODIX55B4_IMAGE_RETRIES);
+      fpi_ssm_jump_to_state (ssm, retry);
+      return FALSE;
+    }
+  self->bad_images = 0;
+  fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
+                         FP_DEVICE_ERROR_PROTO,
+                         "Corrupted %s image (CRC mismatch, %d times)", what,
+                         GOODIX55B4_IMAGE_RETRIES + 1));
+  return FALSE;
 }
 
 static int
@@ -390,6 +438,8 @@ act_setup_frame (FpDevice *dev, guint8 *data, guint16 len, gpointer ssm,
       fpi_ssm_mark_failed (ssm, error);
       return;
     }
+  if (!image_crc_ok (self, ssm, data, len, ACT_SETUP_FRAME, "setup"))
+    return;
   g_clear_pointer (&self->setup, g_free);
   self->setup = g_new (guint16, GOODIX55B4_PIXELS);
   if (!decode_frame (data, len, self->setup))
@@ -662,6 +712,7 @@ dev_open (FpDevice *dev)
       return;
     }
   self->clear_tries = 0;
+  self->bad_images = 0;
   self->usb_reset_tried = FALSE;
   fpi_ssm_start (fpi_ssm_new (dev, activate_run_state, ACT_NUM_STATES),
                  activate_complete);
@@ -683,6 +734,21 @@ enum scan_states {
 static void scan_up_cb (FpDevice *dev, guint8 *data, guint16 len,
                         gpointer ssm, GError *error);
 
+static void up_watchdog_cb (FpDevice *dev,
+                            gpointer  user_data);
+
+static void
+arm_up_watchdog (FpiDeviceGoodix55b4 *self)
+{
+  g_clear_pointer (&self->up_watchdog, g_source_destroy);
+  self->up_watchdog = fpi_device_add_timeout (FP_DEVICE (self),
+                                              GOODIX55B4_FDT_UP_WATCHDOG_MS,
+                                              up_watchdog_cb, NULL, NULL);
+  /* count from now, not from the main loop's cached time */
+  g_source_set_ready_time (self->up_watchdog, g_get_monotonic_time () +
+                           GOODIX55B4_FDT_UP_WATCHDOG_MS * G_GINT64_CONSTANT (1000));
+}
+
 static void
 up_watchdog_cb (FpDevice *dev, gpointer user_data)
 {
@@ -693,6 +759,19 @@ up_watchdog_cb (FpDevice *dev, gpointer user_data)
   self->up_watchdog = NULL;
   if (!self->scan_ssm || fpi_ssm_get_cur_state (self->scan_ssm) != SCAN_WAIT_UP)
     return;
+
+  /* Was armed once per wait: had the forced re-arm below gone unanswered
+   * too, the scan would have waited forever. */
+  if (self->up_forced)
+    {
+      fp_warn ("No reply to the forced finger-up either; giving up");
+      goodix_abort_command (dev);
+      fpi_ssm_mark_failed (self->scan_ssm, fpi_device_error_new_msg (
+                             FP_DEVICE_ERROR_PROTO,
+                             "Finger-up detection is not responding"));
+      return;
+    }
+  self->up_forced = TRUE;
 
   /* Safety net: no lift event although the finger should be long gone.
    * Re-arm finger-up with all thresholds at the "untouched" level, which the
@@ -705,6 +784,7 @@ up_watchdog_cb (FpDevice *dev, gpointer user_data)
   payload = fdt_payload (GOODIX55B4_FDT_OP_UP, self->fdt_up, &len);
   goodix_send_mcu_switch_to_fdt_up (dev, payload, len, g_free, scan_up_cb,
                                     self->scan_ssm);
+  arm_up_watchdog (self);
 }
 
 static void
@@ -715,6 +795,7 @@ scan_up_cb (FpDevice *dev, guint8 *data, guint16 len, gpointer ssm,
   FdtReading r;
 
   g_clear_pointer (&self->up_watchdog, g_source_destroy);
+  self->up_forced = FALSE; /* the device answered */
   if (error)
     {
       fpi_ssm_mark_failed (ssm, error);
@@ -804,6 +885,8 @@ scan_image_cb (FpDevice *dev, guint8 *data, guint16 len, gpointer ssm,
       fpi_ssm_mark_failed (ssm, error);
       return;
     }
+  if (!image_crc_ok (self, ssm, data, len, SCAN_IMAGE, "finger"))
+    return;
   g_clear_pointer (&self->frame, g_free);
   self->frame = g_new (guint16, GOODIX55B4_PIXELS);
   if (!decode_frame (data, len, self->frame))
@@ -867,13 +950,7 @@ scan_run_state (FpiSsm *ssm, FpDevice *dev)
       payload = fdt_payload (GOODIX55B4_FDT_OP_UP, self->fdt_up, &len);
       goodix_send_mcu_switch_to_fdt_up (dev, payload, len, g_free, scan_up_cb,
                                         ssm);
-      g_clear_pointer (&self->up_watchdog, g_source_destroy);
-      self->up_watchdog = fpi_device_add_timeout (dev,
-                                                  GOODIX55B4_FDT_UP_WATCHDOG_MS,
-                                                  up_watchdog_cb, NULL, NULL);
-      /* count from now, not from the main loop's cached time */
-      g_source_set_ready_time (self->up_watchdog, g_get_monotonic_time () +
-                               GOODIX55B4_FDT_UP_WATCHDOG_MS * G_GINT64_CONSTANT (1000));
+      arm_up_watchdog (self);
       break;
 
     case SCAN_WAIT_DOWN:
@@ -905,6 +982,8 @@ scan_start (FpDevice *dev, FpiSsmCompletedCallback done)
 
   g_assert (self->scan_ssm == NULL);
   self->rearms = 0;
+  self->up_forced = FALSE;
+  self->bad_images = 0;
   self->scan_ssm = fpi_ssm_new (dev, scan_run_state, SCAN_NUM_STATES);
   fpi_ssm_start (self->scan_ssm, done);
 }
