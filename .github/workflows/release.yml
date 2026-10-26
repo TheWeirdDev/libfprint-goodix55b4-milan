@@ -20,18 +20,21 @@ jobs:
     container: archlinux:base-devel
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Install git and gh
         run: pacman -Syu --noconfirm --needed git github-cli
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ env.TAG }}
 
       - name: Check the tag matches pkgver
         working-directory: packaging/arch
         run: |
-          source PKGBUILD
+          source ./PKGBUILD
           if [ "$TAG" != "v$pkgver" ]; then
             echo "::error::tag $TAG does not match PKGBUILD pkgver $pkgver"
             exit 1
@@ -40,7 +43,7 @@ jobs:
       - name: Install build dependencies
         working-directory: packaging/arch
         run: |
-          source PKGBUILD
+          source ./PKGBUILD
           pacman -S --noconfirm --needed "${depends[@]}" "${makedepends[@]}"
 
       # makepkg refuses to run as root. The PKGBUILD fetches the driver at
