@@ -4,12 +4,19 @@
 #
 #   scripts/build-local.sh            # clone/update, integrate, build
 #   LIBFPRINT_DIR=/path scripts/build-local.sh   # use an existing checkout
+#   SANITIZE=1 scripts/build-local.sh # ASan+UBSan build in builddir-asan
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 REV=80a4b5ec612892c5c056c48dddaa561452cf37ec   # libfprint v1.94.100
 URL=https://gitlab.freedesktop.org/libfprint/libfprint.git
 LF=${LIBFPRINT_DIR:-$ROOT/.build/libfprint}
+BUILD=$LF/builddir
+SANITIZE_ARGS=()
+if [[ ${SANITIZE:-0} == 1 ]]; then
+    BUILD=$LF/builddir-asan
+    SANITIZE_ARGS=(-Db_sanitize=address,undefined -Db_lundef=false)
+fi
 
 if [[ ! -d $LF/.git ]]; then
     git clone --quiet "$URL" "$LF"
@@ -26,12 +33,12 @@ python3 -I "$ROOT/scripts/integrate.py" "$LF"
 sed -i 's/foreach driver_test: drivers_tests/foreach driver_test, _: drivers_tests/' \
     "$LF/tests/meson.build"
 
-if [[ ! -d $LF/builddir ]]; then
-    meson setup "$LF/builddir" "$LF" \
+if [[ ! -d $BUILD ]]; then
+    meson setup "$BUILD" "$LF" \
         -Ddrivers=goodix55b4 -Dudev_hwdb=disabled -Dudev_rules=disabled \
         -Dintrospection=false -Dinstalled-tests=false -Ddoc=false \
-        -Dgtk-examples=false
+        -Dgtk-examples=false "${SANITIZE_ARGS[@]}"
 fi
-ninja -C "$LF/builddir"
-echo "built: $LF/builddir/libfprint/libfprint-2.so"
-echo "examples: $LF/builddir/examples/{img-capture,enroll,verify,identify}"
+ninja -C "$BUILD"
+echo "built: $BUILD/libfprint/libfprint-2.so"
+echo "examples: $BUILD/examples/{img-capture,enroll,verify,identify}"

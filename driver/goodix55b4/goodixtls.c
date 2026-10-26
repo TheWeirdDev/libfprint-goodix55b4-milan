@@ -17,176 +17,285 @@
 // License along with this library; if not, write to the Free Software
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
 
-#include <arpa/inet.h>
-#include <errno.h>
-#include <glib.h>
-#include <netinet/in.h>
-#include <openssl/crypto.h>
+#define FP_COMPONENT "goodixtls"
+
+#include <limits.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
-#include <openssl/tls1.h>
-#include <poll.h>
-#include <pthread.h>
-#include <signal.h>
 #include <string.h>
-#include <sys/socket.h>
 
-#include "drivers_api.h"
 #include "fp-device.h"
-#include "fpi-device.h"
-#include "glibconfig.h"
-#include "goodix.h"
+#include "fpi-log.h"
 #include "goodixtls.h"
 
-static GError *
-err_from_ssl (void)
+/* Was an SSL_accept() thread on a socketpair: the main loop blocked in
+ * read() on it during the handshake (forever if the handshake failed), and
+ * teardown freed the SSL object while the thread could still be using it. */
+struct _GoodixTlsServer
 {
-  /* Was a hand-built GError: uninitialized domain, a 1-byte heap overflow in
-   * malloc (strlen) + strcpy, and a NULL dereference with an empty queue. */
-  unsigned long code = ERR_get_error ();
-  const char *msg = ERR_reason_error_string (code);
+  SSL_CTX *ctx;
+  SSL     *ssl;
+  BIO     *rbio;        /* device -> engine, owned by ssl */
+  BIO     *wbio;        /* engine -> device, owned by ssl */
+  gboolean established;
+  gboolean failed;      /* a fatal error happened; the session is unusable */
+};
 
-  return g_error_new (FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
-                      "TLS error 0x%lx: %s", code, msg ? msg : "unknown");
+/* Takes the first queued OpenSSL error (the root cause) and clears the
+ * queue, so a stale entry is never reported for a later call. */
+static void
+set_tls_error (GError **error, const char *what, int ssl_error)
+{
+  unsigned long code = ERR_peek_error ();
+  const char *reason = code ? ERR_reason_error_string (code) : NULL;
+
+  if (code)
+    g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                 "TLS %s failed: %s (0x%lx)", what,
+                 reason ? reason : "unknown", code);
+  else
+    g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                 "TLS %s failed (SSL error %d)", what, ssl_error);
+  ERR_clear_error ();
 }
 
 static unsigned int
-tls_server_psk_server_callback (SSL           *ssl,
-                                const char    *identity,
-                                unsigned char *psk,
-                                unsigned int   max_psk_len)
+psk_server_callback (SSL           *ssl,
+                     const char    *identity,
+                     unsigned char *psk,
+                     unsigned int   max_psk_len)
 {
-  if (sizeof (goodix_511_psk_0) > max_psk_len)
+  if (max_psk_len < GOODIX_TLS_PSK_LENGTH)
     {
-      fp_dbg ("Provided PSK R is too long for OpenSSL");
+      fp_warn ("PSK buffer too small (%u bytes)", max_psk_len);
       return 0;
     }
-  fp_dbg ("PSK WANTED %d", max_psk_len);
-  // I don't know why we must use OPENSSL_hexstr2buf but just copying zeros
-  // doesn't work
-  const char *buff = "000000000000000000000000000000000000000000000000000000000"
-                     "0000000";
-  long len = 0;
-  unsigned char *key = OPENSSL_hexstr2buf (buff, &len);
-  memcpy (psk, key, len);
-  OPENSSL_free (key);
-
-  return len;
+  memset (psk, 0, GOODIX_TLS_PSK_LENGTH);
+  return GOODIX_TLS_PSK_LENGTH;
 }
 
-static SSL_CTX *
-tls_server_create_ctx (void)
+GoodixTlsServer *
+goodix_tls_server_new (GError **error)
 {
-  const SSL_METHOD *method;
+  g_autoptr(GoodixTlsServer) self = g_new0 (GoodixTlsServer, 1);
 
-  method = TLS_server_method ();
-
-  SSL_CTX *ctx = SSL_CTX_new (method);
-
-    return ctx;
-}
-
-static void tls_server_config_ctx(SSL_CTX* ctx)
-{
-    SSL_CTX_set_ecdh_auto(ctx, 1);
-    SSL_CTX_set_dh_auto(ctx, 1);
-    SSL_CTX_set_cipher_list(ctx, "ALL");
-    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
-    SSL_CTX_set_max_proto_version(ctx, TLS1_2_VERSION);
-    SSL_CTX_set_psk_server_callback(ctx, tls_server_psk_server_callback);
-}
-
-int goodix_tls_client_send(GoodixTlsServer* self, guint8* data, guint16 length)
-{
-    return write(self->client_fd, data, length * sizeof(guint8));
-}
-int goodix_tls_client_recv(GoodixTlsServer* self, guint8* data, guint16 length) {
-    return read(self->client_fd, data, length * sizeof(guint8));
-}
-
-int goodix_tls_server_receive(GoodixTlsServer* self, guint8* data,
-                              guint32 length, GError** error)
-{
-    int retr = SSL_read(self->ssl_layer, data, length * sizeof(guint8));
-    if (retr <= 0) {
-        *error = err_from_ssl();
+  ERR_clear_error ();
+  self->ctx = SSL_CTX_new (TLS_server_method ());
+  if (!self->ctx)
+    {
+      set_tls_error (error, "context creation", 0);
+      return NULL;
     }
-    return retr;
+  /* Same settings as the previous server: TLS 1.2 only, every cipher (the
+   * device picks its PSK suite), the all-zero PSK. */
+  SSL_CTX_set_dh_auto (self->ctx, 1);
+  SSL_CTX_set_options (self->ctx, SSL_OP_NO_RENEGOTIATION);
+  if (!SSL_CTX_set_min_proto_version (self->ctx, TLS1_2_VERSION) ||
+      !SSL_CTX_set_max_proto_version (self->ctx, TLS1_2_VERSION) ||
+      !SSL_CTX_set_cipher_list (self->ctx, "ALL"))
+    {
+      set_tls_error (error, "context setup", 0);
+      return NULL;
+    }
+  SSL_CTX_set_psk_server_callback (self->ctx, psk_server_callback);
+
+  self->ssl = SSL_new (self->ctx);
+  if (!self->ssl)
+    {
+      set_tls_error (error, "session creation", 0);
+      return NULL;
+    }
+  self->rbio = BIO_new (BIO_s_mem ());
+  self->wbio = BIO_new (BIO_s_mem ());
+  if (!self->rbio || !self->wbio)
+    {
+      BIO_free (self->rbio);
+      BIO_free (self->wbio);
+      self->rbio = self->wbio = NULL;
+      set_tls_error (error, "BIO creation", 0);
+      return NULL;
+    }
+  /* An empty input BIO means "wait for more", not EOF. */
+  BIO_set_mem_eof_return (self->rbio, -1);
+  SSL_set_bio (self->ssl, self->rbio, self->wbio);
+  SSL_set_accept_state (self->ssl);
+
+  return g_steal_pointer (&self);
 }
 
-static void tls_config_ssl(SSL* ssl)
+void
+goodix_tls_server_free (GoodixTlsServer *self)
 {
-    SSL_set_min_proto_version(ssl, TLS1_2_VERSION);
-    SSL_set_max_proto_version(ssl, TLS1_2_VERSION);
-    SSL_set_psk_server_callback(ssl, tls_server_psk_server_callback);
-    SSL_set_cipher_list(ssl, "ALL");
+  if (!self)
+    return;
+  /* SSL_free also frees both BIOs. No close_notify: the device never reads
+   * one, and the session is dropped with the USB interface anyway. */
+  SSL_free (self->ssl);
+  SSL_CTX_free (self->ctx);
+  g_free (self);
 }
 
-
-static void *
-goodix_tls_init_serve (void *me)
+static gboolean
+feed (GoodixTlsServer *self, const guint8 *data, gsize length, GError **error)
 {
-  GoodixTlsServer *self = me;
+  if (length == 0)
+    return TRUE;
+  if (length > INT_MAX || BIO_write (self->rbio, data, (int) length) != (int) length)
+    {
+      self->failed = TRUE;
+      set_tls_error (error, "input buffering", 0);
+      return FALSE;
+    }
+  return TRUE;
+}
 
-  fp_dbg ("TLS server waiting to accept...");
-  int retr = SSL_accept (self->ssl_layer);
+/* Everything the engine wrote for the device, or NULL. */
+static GBytes *
+drain_output (GoodixTlsServer *self)
+{
+  size_t pending = BIO_ctrl_pending (self->wbio);
+  guint8 *buf;
+  int n;
 
-  fp_dbg ("TLS server accept done");
-  if (retr <= 0)
-    self->connection_callback (self, err_from_ssl (), self->user_data);
-  else
-    self->connection_callback (self, NULL, self->user_data);
-  return NULL;
+  if (pending == 0 || pending > INT_MAX)
+    return NULL;
+  buf = g_malloc (pending);
+  n = BIO_read (self->wbio, buf, (int) pending);
+  if (n <= 0)
+    {
+      g_free (buf);
+      return NULL;
+    }
+  return g_bytes_new_take (buf, n);
 }
 
 gboolean
-goodix_tls_server_deinit (GoodixTlsServer *self, GError **error)
+goodix_tls_server_handshake (GoodixTlsServer *self,
+                             const guint8    *data,
+                             gsize            length,
+                             GBytes         **output,
+                             gboolean        *established,
+                             GError         **error)
 {
-  SSL_shutdown (self->ssl_layer);
-  SSL_free (self->ssl_layer);
+  g_return_val_if_fail (self != NULL, FALSE);
+  g_return_val_if_fail (data != NULL || length == 0, FALSE);
+  g_return_val_if_fail (output != NULL && established != NULL, FALSE);
 
-  close (self->client_fd);
-  close (self->sock_fd);
+  *output = NULL;
+  *established = FALSE;
+  if (self->failed)
+    {
+      g_set_error_literal (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                           "TLS session already failed");
+      return FALSE;
+    }
+  if (!feed (self, data, length, error))
+    return FALSE;
 
-  SSL_CTX_free (self->ssl_ctx);
+  if (!self->established)
+    {
+      int ret;
 
+      ERR_clear_error ();
+      ret = SSL_do_handshake (self->ssl);
+      if (ret == 1)
+        {
+          self->established = TRUE;
+          fp_dbg ("TLS handshake done, cipher %s",
+                  SSL_get_cipher_name (self->ssl));
+        }
+      else
+        {
+          int ssl_error = SSL_get_error (self->ssl, ret);
+
+          if (ssl_error != SSL_ERROR_WANT_READ &&
+              ssl_error != SSL_ERROR_WANT_WRITE)
+            {
+              self->failed = TRUE;
+              /* Hand out the alert OpenSSL queued for the device. */
+              *output = drain_output (self);
+              set_tls_error (error, "handshake", ssl_error);
+              return FALSE;
+            }
+        }
+    }
+
+  *output = drain_output (self);
+  *established = self->established;
   return TRUE;
 }
 
 gboolean
-goodix_tls_server_init (GoodixTlsServer *self, GError **error)
+goodix_tls_server_is_established (GoodixTlsServer *self)
 {
-  g_assert (self->connection_callback);
-  SSL_load_error_strings ();
-  OpenSSL_add_ssl_algorithms ();
-  SSL_library_init ();
-  self->ssl_ctx = tls_server_create_ctx ();
-  tls_server_config_ctx (self->ssl_ctx);
+  g_return_val_if_fail (self != NULL, FALSE);
 
-  int socks[2] = {0, 0};
-  if (socketpair (AF_UNIX, SOCK_STREAM, 0, socks) != 0)
+  return self->established && !self->failed;
+}
+
+GBytes *
+goodix_tls_server_decrypt (GoodixTlsServer *self,
+                           const guint8    *data,
+                           gsize            length,
+                           GError         **error)
+{
+  g_autoptr(GByteArray) plain = NULL;
+
+  g_return_val_if_fail (self != NULL, NULL);
+  g_return_val_if_fail (data != NULL || length == 0, NULL);
+
+  if (!goodix_tls_server_is_established (self))
     {
-      g_set_error (error, G_FILE_ERROR, errno,
-                   "failed to create socket pair: %s", strerror (errno));
-      return FALSE;
+      g_set_error_literal (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                           "TLS session is not established");
+      return NULL;
     }
-  self->sock_fd = socks[0];
-  self->client_fd = socks[1];
+  if (!feed (self, data, length, error))
+    return NULL;
 
-  if (self->ssl_ctx == NULL)
+  plain = g_byte_array_new ();
+  /* One SSL_read returns at most one record; read until the input is used. */
+  for (;;)
     {
-      fp_dbg ("Unable to create TLS server context\n");
-      *error = fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL, "Unable to "
-                                                                  "create TLS "
-                                                                  "server "
-                                                                  "context");
-      return FALSE;
+      const guint chunk = 16384; /* maximum TLS record plaintext */
+      guint used = plain->len;
+      int n;
+
+      g_byte_array_set_size (plain, used + chunk);
+      ERR_clear_error ();
+      n = SSL_read (self->ssl, plain->data + used, chunk);
+      if (n > 0)
+        {
+          g_byte_array_set_size (plain, used + n);
+          continue;
+        }
+      g_byte_array_set_size (plain, used);
+
+      int ssl_error = SSL_get_error (self->ssl, n);
+      if (ssl_error == SSL_ERROR_WANT_READ)
+        break;
+      self->failed = TRUE;
+      if (ssl_error == SSL_ERROR_ZERO_RETURN)
+        g_set_error_literal (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                             "TLS session closed by the device");
+      else
+        set_tls_error (error, "decryption", ssl_error);
+      return NULL;
     }
-  self->ssl_layer = SSL_new (self->ssl_ctx);
-  tls_config_ssl (self->ssl_layer);
-  SSL_set_fd (self->ssl_layer, self->sock_fd);
 
-  pthread_create (&self->serve_thread, 0, goodix_tls_init_serve, self);
-
-  return TRUE;
+  /* A record cut short would desynchronise every later read. */
+  if (SSL_has_pending (self->ssl) || BIO_ctrl_pending (self->rbio) > 0)
+    {
+      self->failed = TRUE;
+      g_set_error_literal (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                           "Truncated TLS record from the device");
+      return NULL;
+    }
+  if (plain->len == 0)
+    {
+      g_set_error_literal (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                           "No TLS application data from the device");
+      return NULL;
+    }
+  return g_byte_array_free_to_bytes (g_steal_pointer (&plain));
 }
