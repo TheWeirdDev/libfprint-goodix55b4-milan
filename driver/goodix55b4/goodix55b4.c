@@ -51,6 +51,7 @@ struct _FpiDeviceGoodix55b4
   gboolean           finger_on;  /* last FDT reading said "touched" */
   guint              rearms;
   guint              clear_tries;
+  gboolean           usb_reset_tried; /* during the current open */
   FpiSsm            *scan_ssm;
   GSource           *up_watchdog;
 
@@ -529,9 +530,62 @@ study_dir (void)
   return g_build_filename (state_dir (), GOODIX55B4_STUDY_SUBDIR, NULL);
 }
 
+static void activate_complete (FpiSsm  *ssm,
+                               FpDevice *dev,
+                               GError   *error);
+
+static gboolean
+is_timeout_error (GError *error)
+{
+  return g_error_matches (error, G_USB_DEVICE_ERROR,
+                          G_USB_DEVICE_ERROR_TIMED_OUT) ||
+         g_error_matches (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
+}
+
+/* An operation cut short (e.g. an open racing system suspend) can leave the
+ * MCU NAKing every OUT transfer, and the kernel does not reset it on resume.
+ * A port reset recovers it, as in goodixmoc/synaptics. Only done when an
+ * activation times out, so normal opens stay fast. */
+static gboolean
+activate_retry_after_usb_reset (FpDevice *dev, GError *error)
+{
+  FpiDeviceGoodix55b4 *self = FPI_DEVICE_GOODIX55B4 (dev);
+  GError *local_error = NULL;
+
+  if (self->usb_reset_tried || !is_timeout_error (error))
+    return FALSE;
+  self->usb_reset_tried = TRUE;
+
+  fp_warn ("activation failed: %s; resetting the USB device and retrying",
+           error->message);
+
+  goodix_dev_deinit (dev, &local_error);
+  g_clear_error (&local_error);
+
+  if (!g_usb_device_reset (fpi_device_get_usb_device (dev), &local_error) ||
+      !goodix_dev_init (dev, &local_error))
+    {
+      fp_warn ("USB reset failed: %s", local_error->message);
+      g_clear_error (&local_error);
+      return FALSE;
+    }
+
+  fpi_ssm_start (fpi_ssm_new (dev, activate_run_state, ACT_NUM_STATES),
+                 activate_complete);
+  return TRUE;
+}
+
 static void
 activate_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
+  FpiDeviceGoodix55b4 *self = FPI_DEVICE_GOODIX55B4 (dev);
+
+  if (activate_retry_after_usb_reset (dev, error))
+    {
+      g_error_free (error);
+      return;
+    }
+
   if (error)
     {
       GError *deinit_error = NULL;
@@ -542,7 +596,9 @@ activate_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
     }
   else
     {
-      engine_state_open (FPI_DEVICE_GOODIX55B4 (dev));
+      if (self->usb_reset_tried)
+        fp_warn ("activation succeeded after USB reset");
+      engine_state_open (self);
     }
   fpi_device_open_complete (dev, error);
 }
@@ -559,6 +615,7 @@ dev_open (FpDevice *dev)
       return;
     }
   self->clear_tries = 0;
+  self->usb_reset_tried = FALSE;
   fpi_ssm_start (fpi_ssm_new (dev, activate_run_state, ACT_NUM_STATES),
                  activate_complete);
 }

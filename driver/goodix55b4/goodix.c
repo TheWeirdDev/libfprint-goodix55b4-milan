@@ -432,7 +432,10 @@ goodix_receive_data_cb (FpiUsbTransfer *transfer, FpDevice *dev,
   FpiDeviceGoodixTlsPrivate *priv =
     fpi_device_goodixtls_get_instance_private (self);
 
-  if (g_cancellable_is_cancelled (priv->transfer_cancel_tkn))
+  /* The token is replaced by goodix_dev_init, so a transfer cancelled by
+   * goodix_dev_deinit can complete after a re-init: check the error too. */
+  if (g_cancellable_is_cancelled (priv->transfer_cancel_tkn) ||
+      g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
     {
       fp_dbg ("transfer cancelled, aborting read loop...");
       return;
@@ -1299,12 +1302,6 @@ goodix_dev_init (FpDevice *dev, GError **error)
   priv->data = NULL;
   priv->length = 0;
   priv->transfer_cancel_tkn = g_cancellable_new ();
-
-  /* An operation cut short (e.g. an open racing system suspend) can leave
-   * the MCU NAKing every OUT transfer, and the kernel does not reset it on
-   * resume. A port reset recovers it, as in goodixmoc/synaptics. */
-  if (!g_usb_device_reset (fpi_device_get_usb_device (dev), error))
-    return FALSE;
 
   return g_usb_device_claim_interface (fpi_device_get_usb_device (dev),
                                        class->interface, 0, error);
