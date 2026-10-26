@@ -7,7 +7,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-REV=0c97a47d8ef405cd577b87058c1e89cae9d242e7   # libfprint v1.94.10
+REV=80a4b5ec612892c5c056c48dddaa561452cf37ec   # libfprint v1.94.100
 URL=https://gitlab.freedesktop.org/libfprint/libfprint.git
 LF=${LIBFPRINT_DIR:-$ROOT/.build/libfprint}
 
@@ -21,6 +21,10 @@ fi
 # Start from a pristine tree so integration stays reproducible.
 git -C "$LF" checkout --quiet -- .
 python3 -I "$ROOT/scripts/integrate.py" "$LF"
+# 1.94.100 fails to configure with -Dintrospection=false (one-variable
+# foreach over a dict in tests/meson.build).
+sed -i 's/foreach driver_test: drivers_tests/foreach driver_test, _: drivers_tests/' \
+    "$LF/tests/meson.build"
 
 if [[ ! -d $LF/builddir ]]; then
     meson setup "$LF/builddir" "$LF" \

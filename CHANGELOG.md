@@ -3,6 +3,12 @@
 Versions are `<libfprint version>.m<n>`; each `v…` tag is built and published
 as a GitHub release with its section below as the release notes.
 
+## v1.94.100.m1 - 2026-10-26
+
+- Rebased on upstream libfprint 1.94.100 (was 1.94.10). The driver itself is
+  unchanged; `integrate.py` now also handles 1.94.100's new driver table in
+  `meson.build`. Prints enrolled with earlier versions keep working.
+
 ## v1.94.10.m5 - 2026-10-26
 
 - Support for the Goodix 27c6:5584 sensor: the same Milan die and protocol as

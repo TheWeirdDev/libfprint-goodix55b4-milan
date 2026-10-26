@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add the goodix55b4 driver to a libfprint source tree (tested: 1.94.10).
+"""Add the goodix55b4 driver to a libfprint source tree (tested: 1.94.10, 1.94.100).
 
   integrate.py LIBFPRINT_DIR
 
@@ -65,6 +65,11 @@ def main():
     p = os.path.join(lf, "meson.build")
 
     def top(t):
+        if "drivers_info = {\n" in t:
+            # >= 1.94.100: one table of drivers and their helpers.
+            return insert_after(t, "drivers_info = {\n",
+                                "    '%s': { 'helper': ['openssl'] },\n"
+                                % DRIVER, p)
         t = insert_after(t, "default_drivers = [\n", "    '%s',\n" % DRIVER, p)
         t = insert_after(t, "driver_helper_mapping = {\n",
                          "    '%s' : [ 'openssl' ],\n" % DRIVER, p)

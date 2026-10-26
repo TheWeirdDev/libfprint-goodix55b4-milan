@@ -16,7 +16,7 @@ libfprint work (commit in `driver/goodix55b4/milan/UPSTREAM_COMMIT`). The
 ## Install (Arch Linux)
 
 The package is a drop-in replacement for `libfprint`. It builds upstream
-libfprint 1.94.10 with every normal driver plus this one. It is on the AUR as
+libfprint 1.94.100 with every normal driver plus this one. It is on the AUR as
 [`libfprint-goodix55b4`](https://aur.archlinux.org/packages/libfprint-goodix55b4):
 
     yay -S libfprint-goodix55b4      # or paru, or any AUR helper
