@@ -11,6 +11,7 @@
 
 #include "goodix55b4-state.h"
 #include "goodix55b4-state-layout.h"
+#include "goodix55b4-writer.h"
 
 #include <errno.h>
 #include <gio/gio.h>
@@ -207,19 +208,45 @@ goodix55b4_state_save (const Goodix55b4EngineState *s, const char *path,
 
 struct _Goodix55b4StateSaver
 {
-  gchar                 *path;
-  guint16                subtype;
+  gchar            *path;
+  guint16           subtype;
+  Goodix55b4Writer *writer;
 
-  /* pthread rather than GMutex/GCond: GLib's futex-based ones are
-   * invisible to ThreadSanitizer, which then reports false races here. */
-  pthread_mutex_t        lock;
-  pthread_cond_t         idle_cond;
-  Goodix55b4EngineState *pending;      /* next state to write, owned */
-  gboolean               busy;         /* a worker thread is running */
-  guint8                 last[32];     /* digest of the file's contents */
-  gboolean               have_last;
-  guint                  writes;
+  /* Digest of the file's contents, shared with the writer's thread. */
+  pthread_mutex_t   last_lock;
+  guint8            last[32];
+  gboolean          have_last;
 };
+
+/* On the writer's thread. */
+static gboolean
+saver_write (const char *key, gpointer item, gpointer user_data,
+             gboolean *written, GError **error)
+{
+  Goodix55b4StateSaver *saver = user_data;
+  const Goodix55b4EngineState *s = item;
+  guint8 sum[32];
+  gboolean unchanged;
+
+  digest (s, sum);
+  pthread_mutex_lock (&saver->last_lock);
+  unchanged = saver->have_last && memcmp (sum, saver->last, sizeof (sum)) == 0;
+  pthread_mutex_unlock (&saver->last_lock);
+  if (unchanged)
+    {
+      *written = FALSE;
+      return TRUE;
+    }
+  if (!goodix55b4_state_save (s, saver->path, saver->subtype, error))
+    return FALSE;
+
+  pthread_mutex_lock (&saver->last_lock);
+  memcpy (saver->last, sum, sizeof (sum));
+  saver->have_last = TRUE;
+  pthread_mutex_unlock (&saver->last_lock);
+  *written = TRUE;
+  return TRUE;
+}
 
 Goodix55b4StateSaver *
 goodix55b4_state_saver_new (const char *path, guint16 subtype)
@@ -228,18 +255,16 @@ goodix55b4_state_saver_new (const char *path, guint16 subtype)
 
   saver->path = g_strdup (path);
   saver->subtype = subtype;
-  pthread_mutex_init (&saver->lock, NULL);
-  pthread_cond_init (&saver->idle_cond, NULL);
+  pthread_mutex_init (&saver->last_lock, NULL);
+  saver->writer = goodix55b4_writer_new ("engine state", saver_write, saver,
+                                         NULL);
   return saver;
 }
 
 void
 goodix55b4_state_saver_flush (Goodix55b4StateSaver *saver)
 {
-  pthread_mutex_lock (&saver->lock);
-  while (saver->busy)
-    pthread_cond_wait (&saver->idle_cond, &saver->lock);
-  pthread_mutex_unlock (&saver->lock);
+  goodix55b4_writer_flush (saver->writer);
 }
 
 void
@@ -247,11 +272,9 @@ goodix55b4_state_saver_free (Goodix55b4StateSaver *saver)
 {
   if (!saver)
     return;
-  /* The worker owns no reference: wait until it has let go. */
-  goodix55b4_state_saver_flush (saver);
-  g_free (saver->pending);
-  pthread_mutex_destroy (&saver->lock);
-  pthread_cond_destroy (&saver->idle_cond);
+  /* Flushes first: the writer's thread uses saver until then. */
+  goodix55b4_writer_free (saver->writer);
+  pthread_mutex_destroy (&saver->last_lock);
   g_free (saver->path);
   g_free (saver);
 }
@@ -263,60 +286,16 @@ goodix55b4_state_saver_mark_saved (Goodix55b4StateSaver        *saver,
   guint8 sum[32];
 
   digest (s, sum);
-  pthread_mutex_lock (&saver->lock);
+  pthread_mutex_lock (&saver->last_lock);
   memcpy (saver->last, sum, sizeof (sum));
   saver->have_last = TRUE;
-  pthread_mutex_unlock (&saver->lock);
+  pthread_mutex_unlock (&saver->last_lock);
 }
 
 guint
 goodix55b4_state_saver_writes (Goodix55b4StateSaver *saver)
 {
-  guint writes;
-
-  pthread_mutex_lock (&saver->lock);
-  writes = saver->writes;
-  pthread_mutex_unlock (&saver->lock);
-  return writes;
-}
-
-static gpointer
-saver_worker (gpointer data)
-{
-  Goodix55b4StateSaver *saver = data;
-
-  pthread_mutex_lock (&saver->lock);
-  while (saver->pending)
-    {
-      g_autofree Goodix55b4EngineState *s = g_steal_pointer (&saver->pending);
-      g_autoptr(GError) error = NULL;
-      guint8 sum[32];
-      gboolean unchanged;
-
-      pthread_mutex_unlock (&saver->lock);
-
-      digest (s, sum);
-      pthread_mutex_lock (&saver->lock);
-      unchanged = saver->have_last && memcmp (sum, saver->last, sizeof (sum)) == 0;
-      pthread_mutex_unlock (&saver->lock);
-
-      if (unchanged)
-        fp_dbg ("engine state unchanged, not saved");
-      else if (!goodix55b4_state_save (s, saver->path, saver->subtype, &error))
-        fp_warn ("cannot save engine state: %s", error->message);
-
-      pthread_mutex_lock (&saver->lock);
-      if (!unchanged && !error)
-        {
-          memcpy (saver->last, sum, sizeof (sum));
-          saver->have_last = TRUE;
-          saver->writes++;
-        }
-    }
-  saver->busy = FALSE;
-  pthread_cond_broadcast (&saver->idle_cond);
-  pthread_mutex_unlock (&saver->lock);
-  return NULL;
+  return goodix55b4_writer_writes (saver->writer);
 }
 
 void
@@ -324,30 +303,6 @@ goodix55b4_state_saver_queue (Goodix55b4StateSaver        *saver,
                               const Goodix55b4EngineState *s)
 {
   /* A copy: the caller keeps changing its state. ~212 KB, heap only. */
-  Goodix55b4EngineState *copy = g_memdup2 (s, sizeof (*s));
-  g_autoptr(GError) error = NULL;
-  GThread *thread;
-
-  pthread_mutex_lock (&saver->lock);
-  g_free (saver->pending);
-  saver->pending = copy;
-  if (saver->busy)
-    {
-      /* The running worker picks it up. */
-      pthread_mutex_unlock (&saver->lock);
-      return;
-    }
-  saver->busy = TRUE;
-  pthread_mutex_unlock (&saver->lock);
-
-  thread = g_thread_try_new ("goodix55b4-state", saver_worker, saver, &error);
-  if (thread)
-    {
-      g_thread_unref (thread);
-      return;
-    }
-  /* No thread: write here rather than lose the state. */
-  fp_warn ("cannot start the state writer (%s); saving synchronously",
-           error->message);
-  saver_worker (saver);
+  goodix55b4_writer_queue (saver->writer, "state", g_memdup2 (s, sizeof (*s)),
+                           g_free);
 }

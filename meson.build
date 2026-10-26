@@ -48,7 +48,8 @@ if dataset != ''
 endif
 
 foreach t : ['goodixtls', 'goodix-proto', 'goodix55b4-calib',
-             'goodix55b4-state', 'goodix55b4-study', 'goodix55b4-dataset']
+             'goodix55b4-state', 'goodix55b4-study', 'goodix55b4-writer',
+             'goodix55b4-dataset']
   exe = executable('test-' + t, 'tests/test-' + t + '.c',
     c_args: goodix55b4_cflags + lf_inc + ['-Werror'],
     link_with: driver,

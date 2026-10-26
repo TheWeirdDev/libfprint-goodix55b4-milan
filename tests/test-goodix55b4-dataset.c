@@ -465,6 +465,99 @@ test_study (void)
   g_rmdir (dir);
 }
 
+/* Long-run study under a policy, as the driver applies it: every touch of
+ * the finger, twice, the kept template replacing the current one. */
+static void
+run_study_policy (Dataset *d, Goodix55b4StudyPolicy policy)
+{
+  const char *name = goodix55b4_study_policy_name (policy);
+
+  for (guint i = 0; i < d->fingers->len; i++)
+    {
+      Finger *f = d->fingers->pdata[i];
+      g_autoptr(GBytes) cur = g_bytes_ref (f->template);
+      GoodixMilanPrintTemplateInfo info;
+      guint uses = 0, matches = 0, kept = 0, features, false_accepts = 0;
+      gboolean full = FALSE;
+
+      g_assert_true (goodix_milan_print_validate_template (cur, &info, NULL));
+      features = info.feature_count;
+      sim_open (d, f);
+      for (guint pass = 0; pass < 2; pass++)
+        for (guint t = 0; t < f->frames->len; t++)
+          {
+            g_autoptr(GPtrArray) gallery = gallery_of (&cur, 1);
+            GoodixMilanRuntimeOutput *out =
+              sim_run (d, GOODIX_MILAN_PURPOSE_IDENTIFY, f->frames->pdata[t], gallery);
+
+            uses++;
+            if (out->status == GOODIX_MILAN_RUNTIME_MATCH)
+              matches++;
+            if (goodix55b4_study_should_store (policy, out, cur))
+              {
+                g_assert_true (goodix_milan_print_validate_template (
+                  out->final_candidate, &info, NULL));
+                if (policy == GOODIX55B4_STUDY_BOUNDED)
+                  {
+                    /* Only ever grows; nothing once full. */
+                    g_assert_false (full);
+                    g_assert_cmpuint (info.feature_count, ==, features + 1);
+                  }
+                features = info.feature_count;
+                full = features == info.maximum_features;
+                g_bytes_unref (cur);
+                cur = g_bytes_ref (out->final_candidate);
+                kept++;
+              }
+            goodix_milan_runtime_output_free (out);
+          }
+
+      /* The studied template still rejects every other finger. */
+      for (guint j = 0; j < d->fingers->len; j++)
+        {
+          Finger *p = d->fingers->pdata[j];
+          g_autoptr(GPtrArray) gallery = gallery_of (&cur, 1);
+
+          if (j == i)
+            continue;
+          sim_open (d, p);
+          for (guint t = 0; t < p->frames->len; t++)
+            {
+              GoodixMilanRuntimeOutput *out =
+                sim_run (d, GOODIX_MILAN_PURPOSE_IDENTIFY, p->frames->pdata[t], gallery);
+
+              false_accepts += out->status == GOODIX_MILAN_RUNTIME_MATCH;
+              goodix_milan_runtime_output_free (out);
+            }
+        }
+      g_test_message ("%s/%s: %u/%u matched, %u kept, %u features, "
+                      "%u false accepts", name, f->name, matches, uses, kept,
+                      features, false_accepts);
+      g_assert_cmpuint (false_accepts, ==, 0);
+      g_assert_cmpfloat ((double) matches / uses, >=, MIN_GENUINE_ACCEPT_RATE);
+      g_assert_cmpuint (features, <=, 40);
+      sim_open (d, f);
+    }
+}
+
+static void
+test_study_policy_native (void)
+{
+  Dataset *d = get_dataset ();
+
+  if (d)
+    run_study_policy (d, GOODIX55B4_STUDY_NATIVE);
+}
+
+static void
+test_study_policy_bounded (void)
+{
+  Dataset *d = get_dataset ();
+
+  if (d)
+    run_study_policy (d, GOODIX55B4_STUDY_BOUNDED);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -476,6 +569,8 @@ main (int argc, char **argv)
   g_test_add_func ("/dataset/impostors", test_impostors);
   g_test_add_func ("/dataset/identify", test_identify);
   g_test_add_func ("/dataset/study", test_study);
+  g_test_add_func ("/dataset/study-policy/native", test_study_policy_native);
+  g_test_add_func ("/dataset/study-policy/bounded", test_study_policy_bounded);
   ret = g_test_run ();
 
   if (dataset)

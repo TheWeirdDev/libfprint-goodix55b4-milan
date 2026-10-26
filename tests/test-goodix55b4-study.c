@@ -149,6 +149,101 @@ test_bad_arguments (Fixture *f, gconstpointer data)
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
 }
 
+/* ---- policy ---- */
+
+static GoodixMilanRuntimeOutput
+match_output (GBytes *candidate, GoodixMilanStudyAction action, gint score)
+{
+  GoodixMilanRuntimeOutput out;
+
+  memset (&out, 0, sizeof (out));
+  out.status = GOODIX_MILAN_RUNTIME_MATCH;
+  out.final_candidate = candidate;
+  out.study_action = action;
+  out.score = score;
+  return out;
+}
+
+static void
+test_should_store (void)
+{
+  static const guint8 a[] = { 1 }, b[] = { 2 };
+  g_autoptr(GBytes) matched = g_bytes_new_static (a, sizeof (a));
+  g_autoptr(GBytes) studied = g_bytes_new_static (b, sizeof (b));
+  g_autoptr(GBytes) same = g_bytes_new_static (a, sizeof (a));
+  GoodixMilanRuntimeOutput out;
+  const Goodix55b4StudyPolicy N = GOODIX55B4_STUDY_NATIVE;
+  const Goodix55b4StudyPolicy B = GOODIX55B4_STUDY_BOUNDED;
+  const gint min = GOODIX55B4_STUDY_BOUNDED_MIN_SCORE;
+
+  /* Never: off, no match, no candidate, unchanged. */
+  out = match_output (studied, GOODIX_MILAN_STUDY_APPEND, 90);
+  g_assert_false (goodix55b4_study_should_store (GOODIX55B4_STUDY_OFF, &out, matched));
+  out.status = GOODIX_MILAN_RUNTIME_NO_MATCH;
+  g_assert_false (goodix55b4_study_should_store (N, &out, matched));
+  out = match_output (NULL, GOODIX_MILAN_STUDY_APPEND, 90);
+  g_assert_false (goodix55b4_study_should_store (N, &out, matched));
+  out = match_output (same, GOODIX_MILAN_STUDY_APPEND, 90);
+  g_assert_false (goodix55b4_study_should_store (N, &out, matched));
+  g_assert_false (goodix55b4_study_should_store (B, &out, matched));
+
+  /* Native keeps every changed candidate, replacement included. */
+  for (int action = GOODIX_MILAN_STUDY_NONE; action <= GOODIX_MILAN_STUDY_REPLACE; action++)
+    {
+      out = match_output (studied, action, 1);
+      g_assert_true (goodix55b4_study_should_store (N, &out, matched));
+    }
+
+  /* Bounded: appends from confident matches only. */
+  out = match_output (studied, GOODIX_MILAN_STUDY_APPEND, min);
+  g_assert_true (goodix55b4_study_should_store (B, &out, matched));
+  out = match_output (studied, GOODIX_MILAN_STUDY_APPEND, min - 1);
+  g_assert_false (goodix55b4_study_should_store (B, &out, matched));
+  for (int action = GOODIX_MILAN_STUDY_NONE; action <= GOODIX_MILAN_STUDY_REPLACE; action++)
+    {
+      if (action == GOODIX_MILAN_STUDY_APPEND)
+        continue;
+      out = match_output (studied, action, 100);
+      g_assert_false (goodix55b4_study_should_store (B, &out, matched));
+    }
+}
+
+static void
+test_policy_from_env (void)
+{
+  static const struct { const char *policy, *no_study; Goodix55b4StudyPolicy want; } cases[] = {
+    { NULL, NULL, GOODIX55B4_STUDY_NATIVE },
+    { "", NULL, GOODIX55B4_STUDY_NATIVE },
+    { "native", NULL, GOODIX55B4_STUDY_NATIVE },
+    { "bounded", NULL, GOODIX55B4_STUDY_BOUNDED },
+    { "off", NULL, GOODIX55B4_STUDY_OFF },
+    { NULL, "1", GOODIX55B4_STUDY_OFF },
+    { "bounded", "1", GOODIX55B4_STUDY_OFF }, /* NO_STUDY wins */
+    { "bounded", "0", GOODIX55B4_STUDY_BOUNDED },
+  };
+
+  for (guint i = 0; i < G_N_ELEMENTS (cases); i++)
+    {
+      if (cases[i].policy)
+        g_setenv ("GOODIX55B4_STUDY_POLICY", cases[i].policy, TRUE);
+      else
+        g_unsetenv ("GOODIX55B4_STUDY_POLICY");
+      if (cases[i].no_study)
+        g_setenv ("GOODIX55B4_NO_STUDY", cases[i].no_study, TRUE);
+      else
+        g_unsetenv ("GOODIX55B4_NO_STUDY");
+      g_assert_cmpint (goodix55b4_study_policy_from_env (), ==, cases[i].want);
+    }
+
+  g_setenv ("GOODIX55B4_STUDY_POLICY", "aggressive", TRUE);
+  g_unsetenv ("GOODIX55B4_NO_STUDY");
+  g_test_expect_message ("libfprint-goodix55b4", G_LOG_LEVEL_WARNING,
+                         "unknown GOODIX55B4_STUDY_POLICY 'aggressive'*");
+  g_assert_cmpint (goodix55b4_study_policy_from_env (), ==, GOODIX55B4_STUDY_NATIVE);
+  g_test_assert_expected_messages ();
+  g_unsetenv ("GOODIX55B4_STUDY_POLICY");
+}
+
 int
 main (int argc, char **argv)
 {
@@ -162,5 +257,7 @@ main (int argc, char **argv)
   ADD ("other-key", test_other_key);
   ADD ("bad-arguments", test_bad_arguments);
 #undef ADD
+  g_test_add_func ("/study/should-store", test_should_store);
+  g_test_add_func ("/study/policy-from-env", test_policy_from_env);
   return g_test_run ();
 }
