@@ -45,3 +45,33 @@ gboolean goodix55b4_state_save (const Goodix55b4EngineState *s,
                                 const char                  *path,
                                 guint16                      subtype,
                                 GError                     **error);
+
+/* Writes the state file off the main thread. Was a synchronous ~212 KB
+ * write with fsync on the main loop after every engine run.
+ *
+ * Requests are copied and written in order by a worker thread; one not yet
+ * started is replaced by a newer one (only the latest state matters), and
+ * a state identical to the last one written or loaded is not written.
+ * Write errors are logged; the next request retries. */
+typedef struct _Goodix55b4StateSaver Goodix55b4StateSaver;
+
+Goodix55b4StateSaver *goodix55b4_state_saver_new (const char *path,
+                                                  guint16     subtype);
+
+/* Waits for the pending write, then frees. */
+void goodix55b4_state_saver_free (Goodix55b4StateSaver *saver);
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (Goodix55b4StateSaver, goodix55b4_state_saver_free)
+
+/* The file already holds s (e.g. it was just loaded from it). */
+void goodix55b4_state_saver_mark_saved (Goodix55b4StateSaver        *saver,
+                                        const Goodix55b4EngineState *s);
+
+void goodix55b4_state_saver_queue (Goodix55b4StateSaver        *saver,
+                                   const Goodix55b4EngineState *s);
+
+/* Blocks until every queued state is written (or failed). */
+void goodix55b4_state_saver_flush (Goodix55b4StateSaver *saver);
+
+/* Files actually written so far (for tests and logs). */
+guint goodix55b4_state_saver_writes (Goodix55b4StateSaver *saver);

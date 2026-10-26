@@ -7,14 +7,28 @@
  * version 2.1 of the License, or (at your option) any later version.
  */
 
+#define FP_COMPONENT "goodix55b4"
+
 #include "goodix55b4-state.h"
+#include "goodix55b4-state-layout.h"
 
 #include <errno.h>
 #include <gio/gio.h>
+#include <pthread.h>
 #include <string.h>
+
+#include "fpi-log.h"
 
 /* "G55BST" + format version; bump on any layout change. */
 static const char STATE_MAGIC[8] = { 'G', '5', '5', 'B', 'S', 'T', '0', '1' };
+
+/* The layout STATE_MAGIC "01" files were written with. If this fails, the
+ * engine state structs changed: bump STATE_MAGIC (old files are then
+ * ignored and the engine starts afresh) and set the new value, printed by
+ * printf ("0x%08xu", GOODIX55B4_STATE_LAYOUT). */
+_Static_assert (GOODIX55B4_STATE_LAYOUT == 0x8a03c60bu,
+                "engine state layout changed: bump STATE_MAGIC and update "
+                "the pinned layout value");
 
 typedef struct __attribute__((packed))
 {
@@ -189,4 +203,151 @@ goodix55b4_state_save (const Goodix55b4EngineState *s, const char *path,
   /* g_file_set_contents writes to a temp file and renames: no torn state. */
   return g_file_set_contents_full (path, (const gchar *) buf, len,
                                    G_FILE_SET_CONTENTS_CONSISTENT, 0600, error);
+}
+
+struct _Goodix55b4StateSaver
+{
+  gchar                 *path;
+  guint16                subtype;
+
+  /* pthread rather than GMutex/GCond: GLib's futex-based ones are
+   * invisible to ThreadSanitizer, which then reports false races here. */
+  pthread_mutex_t        lock;
+  pthread_cond_t         idle_cond;
+  Goodix55b4EngineState *pending;      /* next state to write, owned */
+  gboolean               busy;         /* a worker thread is running */
+  guint8                 last[32];     /* digest of the file's contents */
+  gboolean               have_last;
+  guint                  writes;
+};
+
+Goodix55b4StateSaver *
+goodix55b4_state_saver_new (const char *path, guint16 subtype)
+{
+  Goodix55b4StateSaver *saver = g_new0 (Goodix55b4StateSaver, 1);
+
+  saver->path = g_strdup (path);
+  saver->subtype = subtype;
+  pthread_mutex_init (&saver->lock, NULL);
+  pthread_cond_init (&saver->idle_cond, NULL);
+  return saver;
+}
+
+void
+goodix55b4_state_saver_flush (Goodix55b4StateSaver *saver)
+{
+  pthread_mutex_lock (&saver->lock);
+  while (saver->busy)
+    pthread_cond_wait (&saver->idle_cond, &saver->lock);
+  pthread_mutex_unlock (&saver->lock);
+}
+
+void
+goodix55b4_state_saver_free (Goodix55b4StateSaver *saver)
+{
+  if (!saver)
+    return;
+  /* The worker owns no reference: wait until it has let go. */
+  goodix55b4_state_saver_flush (saver);
+  g_free (saver->pending);
+  pthread_mutex_destroy (&saver->lock);
+  pthread_cond_destroy (&saver->idle_cond);
+  g_free (saver->path);
+  g_free (saver);
+}
+
+void
+goodix55b4_state_saver_mark_saved (Goodix55b4StateSaver        *saver,
+                                   const Goodix55b4EngineState *s)
+{
+  guint8 sum[32];
+
+  digest (s, sum);
+  pthread_mutex_lock (&saver->lock);
+  memcpy (saver->last, sum, sizeof (sum));
+  saver->have_last = TRUE;
+  pthread_mutex_unlock (&saver->lock);
+}
+
+guint
+goodix55b4_state_saver_writes (Goodix55b4StateSaver *saver)
+{
+  guint writes;
+
+  pthread_mutex_lock (&saver->lock);
+  writes = saver->writes;
+  pthread_mutex_unlock (&saver->lock);
+  return writes;
+}
+
+static gpointer
+saver_worker (gpointer data)
+{
+  Goodix55b4StateSaver *saver = data;
+
+  pthread_mutex_lock (&saver->lock);
+  while (saver->pending)
+    {
+      g_autofree Goodix55b4EngineState *s = g_steal_pointer (&saver->pending);
+      g_autoptr(GError) error = NULL;
+      guint8 sum[32];
+      gboolean unchanged;
+
+      pthread_mutex_unlock (&saver->lock);
+
+      digest (s, sum);
+      pthread_mutex_lock (&saver->lock);
+      unchanged = saver->have_last && memcmp (sum, saver->last, sizeof (sum)) == 0;
+      pthread_mutex_unlock (&saver->lock);
+
+      if (unchanged)
+        fp_dbg ("engine state unchanged, not saved");
+      else if (!goodix55b4_state_save (s, saver->path, saver->subtype, &error))
+        fp_warn ("cannot save engine state: %s", error->message);
+
+      pthread_mutex_lock (&saver->lock);
+      if (!unchanged && !error)
+        {
+          memcpy (saver->last, sum, sizeof (sum));
+          saver->have_last = TRUE;
+          saver->writes++;
+        }
+    }
+  saver->busy = FALSE;
+  pthread_cond_broadcast (&saver->idle_cond);
+  pthread_mutex_unlock (&saver->lock);
+  return NULL;
+}
+
+void
+goodix55b4_state_saver_queue (Goodix55b4StateSaver        *saver,
+                              const Goodix55b4EngineState *s)
+{
+  /* A copy: the caller keeps changing its state. ~212 KB, heap only. */
+  Goodix55b4EngineState *copy = g_memdup2 (s, sizeof (*s));
+  g_autoptr(GError) error = NULL;
+  GThread *thread;
+
+  pthread_mutex_lock (&saver->lock);
+  g_free (saver->pending);
+  saver->pending = copy;
+  if (saver->busy)
+    {
+      /* The running worker picks it up. */
+      pthread_mutex_unlock (&saver->lock);
+      return;
+    }
+  saver->busy = TRUE;
+  pthread_mutex_unlock (&saver->lock);
+
+  thread = g_thread_try_new ("goodix55b4-state", saver_worker, saver, &error);
+  if (thread)
+    {
+      g_thread_unref (thread);
+      return;
+    }
+  /* No thread: write here rather than lose the state. */
+  fp_warn ("cannot start the state writer (%s); saving synchronously",
+           error->message);
+  saver_worker (saver);
 }

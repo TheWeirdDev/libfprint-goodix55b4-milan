@@ -59,7 +59,7 @@ struct _FpiDeviceGoodix55b4
   /* Milan engine. Heap-allocated: the state is ~212 KB and GObject
    * instance structs must stay below 64 KB. */
   Goodix55b4EngineState *engine;
-  gchar                *state_path;
+  Goodix55b4StateSaver *saver;      /* writes the state file, per open */
   guint64               epoch;
   GTask                *engine_task;
   Goodix55b4Enroll      enroll;
@@ -493,14 +493,18 @@ static void
 engine_state_open (FpiDeviceGoodix55b4 *self)
 {
   g_autoptr(GError) error = NULL;
+  g_autofree gchar *path = g_build_filename (state_dir (), GOODIX55B4_STATE_FILE,
+                                             NULL);
 
-  g_free (self->state_path);
-  self->state_path = g_build_filename (state_dir (), GOODIX55B4_STATE_FILE, NULL);
-  if (goodix55b4_state_load (self->engine, self->state_path,
-                             GOODIX55B4_SENSOR_SUBTYPE, &error))
+  g_clear_pointer (&self->saver, goodix55b4_state_saver_free);
+  self->saver = goodix55b4_state_saver_new (path, GOODIX55B4_SENSOR_SUBTYPE);
+  if (goodix55b4_state_load (self->engine, path, GOODIX55B4_SENSOR_SUBTYPE,
+                             &error))
     {
       fp_dbg ("restored engine state (%u calibration samples)",
               self->engine->state.sample_count);
+      /* Already on disk: not rewritten until it changes. */
+      goodix55b4_state_saver_mark_saved (self->saver, self->engine);
       goodix55b4_state_new_generation (self->engine);
       return;
     }
@@ -509,15 +513,12 @@ engine_state_open (FpiDeviceGoodix55b4 *self)
   goodix55b4_state_init (self->engine);
 }
 
+/* Queued: written by the saver's thread, never on the main loop. */
 static void
 engine_state_save (FpiDeviceGoodix55b4 *self)
 {
-  g_autoptr(GError) error = NULL;
-
-  if (self->state_path &&
-      !goodix55b4_state_save (self->engine, self->state_path,
-                              GOODIX55B4_SENSOR_SUBTYPE, &error))
-    fp_warn ("cannot save engine state: %s", error->message);
+  if (self->saver)
+    goodix55b4_state_saver_queue (self->saver, self->engine);
 }
 
 static gboolean
@@ -1371,6 +1372,9 @@ close_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
   GError *deinit_error = NULL;
 
   g_clear_error (&error);
+  /* Waits for a write in progress (milliseconds), so fprintd exiting after
+   * close never loses the last state. */
+  g_clear_pointer (&self->saver, goodix55b4_state_saver_free);
   g_clear_pointer (&self->up_watchdog, g_source_destroy);
   g_clear_pointer (&self->setup, g_free);
   g_clear_pointer (&self->frame, g_free);
@@ -1422,7 +1426,7 @@ dev_finalize (GObject *object)
 
   g_clear_pointer (&self->setup, g_free);
   g_clear_pointer (&self->frame, g_free);
-  g_clear_pointer (&self->state_path, g_free);
+  g_clear_pointer (&self->saver, goodix55b4_state_saver_free);
   g_clear_pointer (&self->engine, g_free);
   goodix55b4_enroll_clear (&self->enroll);
   g_clear_pointer (&self->gallery_prints, g_ptr_array_unref);

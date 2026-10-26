@@ -167,6 +167,117 @@ test_new_generation (Fixture *f, gconstpointer data)
   g_assert_cmpuint (f->a->profile.setup_not_ready, ==, 0);
 }
 
+/* ---- background saver ---- */
+
+static void
+assert_file_holds (Fixture *f, const Goodix55b4EngineState *expected)
+{
+  g_autoptr(GError) error = NULL;
+
+  g_assert_true (goodix55b4_state_load (f->b, f->path, SUBTYPE, &error));
+  g_assert_no_error (error);
+  g_assert_cmpmem (f->b, sizeof (*f->b), expected, sizeof (*expected));
+}
+
+static void
+test_saver_writes (Fixture *f, gconstpointer data)
+{
+  g_autoptr(Goodix55b4StateSaver) saver = goodix55b4_state_saver_new (f->path, SUBTYPE);
+
+  goodix55b4_state_saver_queue (saver, f->a);
+  /* The caller's state may change at once: the saver has its own copy. */
+  f->a->state.sample_count = 999;
+  goodix55b4_state_saver_flush (saver);
+  g_assert_cmpuint (goodix55b4_state_saver_writes (saver), ==, 1);
+  f->a->state.sample_count = 7;
+  assert_file_holds (f, f->a);
+}
+
+static void
+test_saver_skips_unchanged (Fixture *f, gconstpointer data)
+{
+  {
+    g_autoptr(Goodix55b4StateSaver) saver = goodix55b4_state_saver_new (f->path, SUBTYPE);
+
+    goodix55b4_state_saver_queue (saver, f->a);
+    goodix55b4_state_saver_flush (saver);
+    goodix55b4_state_saver_queue (saver, f->a);
+    goodix55b4_state_saver_flush (saver);
+    g_assert_cmpuint (goodix55b4_state_saver_writes (saver), ==, 1);
+  }
+  {
+    /* As at open: the loaded state is known to be on disk. */
+    g_autoptr(Goodix55b4StateSaver) saver = goodix55b4_state_saver_new (f->path, SUBTYPE);
+
+    goodix55b4_state_saver_mark_saved (saver, f->a);
+    goodix55b4_state_saver_queue (saver, f->a);
+    goodix55b4_state_saver_flush (saver);
+    g_assert_cmpuint (goodix55b4_state_saver_writes (saver), ==, 0);
+
+    f->a->state.stable_count++;
+    goodix55b4_state_saver_queue (saver, f->a);
+    goodix55b4_state_saver_flush (saver);
+    g_assert_cmpuint (goodix55b4_state_saver_writes (saver), ==, 1);
+    assert_file_holds (f, f->a);
+  }
+}
+
+static void
+test_saver_latest_wins (Fixture *f, gconstpointer data)
+{
+  g_autoptr(Goodix55b4StateSaver) saver = goodix55b4_state_saver_new (f->path, SUBTYPE);
+  guint writes;
+
+  /* Faster than the disk: requests not yet started are replaced. */
+  for (guint i = 1; i <= 50; i++)
+    {
+      f->a->state.sample_count = i;
+      goodix55b4_state_saver_queue (saver, f->a);
+    }
+  goodix55b4_state_saver_flush (saver);
+  writes = goodix55b4_state_saver_writes (saver);
+  g_test_message ("50 requests, %u writes", writes);
+  g_assert_cmpuint (writes, >=, 1);
+  g_assert_cmpuint (writes, <=, 50);
+  assert_file_holds (f, f->a);
+}
+
+static void
+test_saver_error (Fixture *f, gconstpointer data)
+{
+  g_autoptr(GError) error = NULL;
+  g_autofree gchar *blocker = g_path_get_dirname (f->path);
+  g_autoptr(Goodix55b4StateSaver) saver = NULL;
+
+  /* The state directory is a file: the write fails, is logged, and the
+   * next request retries. */
+  g_assert_true (g_file_set_contents (blocker, "x", 1, &error));
+  saver = goodix55b4_state_saver_new (f->path, SUBTYPE);
+  g_test_expect_message ("libfprint-goodix55b4", G_LOG_LEVEL_WARNING,
+                         "cannot save engine state:*");
+  goodix55b4_state_saver_queue (saver, f->a);
+  goodix55b4_state_saver_flush (saver);
+  g_test_assert_expected_messages ();
+  g_assert_cmpuint (goodix55b4_state_saver_writes (saver), ==, 0);
+
+  g_assert_cmpint (g_unlink (blocker), ==, 0);
+  goodix55b4_state_saver_queue (saver, f->a);
+  goodix55b4_state_saver_flush (saver);
+  g_assert_cmpuint (goodix55b4_state_saver_writes (saver), ==, 1);
+  assert_file_holds (f, f->a);
+}
+
+static void
+test_saver_free_flushes (Fixture *f, gconstpointer data)
+{
+  Goodix55b4StateSaver *saver = goodix55b4_state_saver_new (f->path, SUBTYPE);
+
+  /* Freed right after queueing, as at close: the state still lands. */
+  goodix55b4_state_saver_queue (saver, f->a);
+  goodix55b4_state_saver_free (saver);
+  assert_file_holds (f, f->a);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -180,6 +291,11 @@ main (int argc, char **argv)
   ADD ("truncated", test_truncated);
   ADD ("wrong-subtype", test_wrong_subtype);
   ADD ("new-generation", test_new_generation);
+  ADD ("saver/writes", test_saver_writes);
+  ADD ("saver/skips-unchanged", test_saver_skips_unchanged);
+  ADD ("saver/latest-wins", test_saver_latest_wins);
+  ADD ("saver/error", test_saver_error);
+  ADD ("saver/free-flushes", test_saver_free_flushes);
 #undef ADD
   return g_test_run ();
 }
