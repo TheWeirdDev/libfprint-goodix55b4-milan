@@ -656,7 +656,7 @@ up_watchdog_cb (FpDevice *dev, gpointer user_data)
    * finger is in fact still resting, its values become the DOWN table and
    * the lift shows up later as IRQ 0x0080 (baseline refresh). */
   fp_warn ("No finger-up event in %d ms, forcing it", GOODIX55B4_FDT_UP_WATCHDOG_MS);
-  goodix_reset_state (dev);
+  goodix_abort_command (dev);
   memset (self->fdt_up, self->calib.fdt_delta - 2, sizeof (self->fdt_up));
   payload = fdt_payload (GOODIX55B4_FDT_OP_UP, self->fdt_up, &len);
   goodix_send_mcu_switch_to_fdt_up (dev, payload, len, g_free, scan_up_cb,
@@ -1385,7 +1385,7 @@ close_run_state (FpiSsm *ssm, FpDevice *dev)
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case CLOSE_SLEEP:
-      goodix_reset_state (dev);
+      goodix_abort_command (dev);
       /* the helper's "sleep_time" byte is the first payload byte: 01 00 */
       goodix_send_mcu_switch_to_sleep_mode (dev, 0x01, close_next, ssm);
       break;
@@ -1432,7 +1432,7 @@ dev_cancel (FpDevice *dev)
   /* Drop the pending FDT wait (its reply will be ignored) and fail the scan;
    * the scan's completion reports the cancellation to libfprint. */
   g_clear_pointer (&self->up_watchdog, g_source_destroy);
-  goodix_reset_state (dev);
+  goodix_abort_command (dev);
   if (self->scan_ssm)
     fpi_ssm_mark_failed (self->scan_ssm,
                          g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED,

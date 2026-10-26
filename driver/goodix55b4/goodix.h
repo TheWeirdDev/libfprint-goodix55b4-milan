@@ -339,6 +339,9 @@ gboolean goodix_dev_deinit (FpDevice *dev,
                             GError  **error);
 
 void goodix_reset_state (FpDevice *dev);
+/* Drops the pending command (its callback is not called) and any partly
+ * received reply, e.g. on cancellation. */
+void goodix_abort_command (FpDevice *dev);
 void goodix_cancel_receive(FpDevice *dev);
 
 // ---- DEV SECTION END ----

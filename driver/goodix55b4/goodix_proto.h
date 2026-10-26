@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include <glib.h>
+
 #define GOODIX_EP_IN_MAX_BUF_SIZE (0x10000)
 #define GOODIX_EP_OUT_MAX_BUF_SIZE (0x40)
 
@@ -198,3 +200,41 @@ gboolean goodix_decode_protocol (guint8   *data,
                                  guint16  *payload_len,
                                  gboolean *valid_checksum,
                                  gboolean *valid_null_checksum);
+
+/* Reassembles packs from the IN endpoint: a pack may span transfers and a
+ * transfer may hold more than one pack. */
+typedef struct
+{
+  GByteArray *buffer;
+} GoodixPackReader;
+
+typedef enum {
+  GOODIX_PACK_INCOMPLETE, /* need more data */
+  GOODIX_PACK_READY,      /* a pack was taken */
+  GOODIX_PACK_DROPPED,    /* unparseable bytes were discarded */
+} GoodixPackStatus;
+
+void goodix_pack_reader_init (GoodixPackReader *reader);
+
+void goodix_pack_reader_clear (GoodixPackReader *reader);
+
+/* Drops buffered bytes, e.g. the rest of the reply to an aborted command. */
+void goodix_pack_reader_reset (GoodixPackReader *reader);
+
+void goodix_pack_reader_push (GoodixPackReader *reader,
+                              const guint8     *data,
+                              gsize             length);
+
+gsize goodix_pack_reader_buffered (const GoodixPackReader *reader);
+
+/* Takes the next pack. On GOODIX_PACK_READY, *payload is newly allocated
+ * and *valid_checksum tells whether the header checksum matched. Bytes
+ * that do not start a known pack type are skipped up to the next byte
+ * that does: zero padding silently, anything else is reported as
+ * GOODIX_PACK_DROPPED with *dropped set to the number of bytes skipped. */
+GoodixPackStatus goodix_pack_reader_next (GoodixPackReader *reader,
+                                          guint8           *flags,
+                                          guint8          **payload,
+                                          guint16          *payload_len,
+                                          gboolean         *valid_checksum,
+                                          gsize            *dropped);

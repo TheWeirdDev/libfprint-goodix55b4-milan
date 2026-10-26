@@ -20,6 +20,7 @@
 #include <gio/gio.h>
 #include <glib.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "goodix_proto.h"
 
@@ -130,11 +131,88 @@ goodix_decode_protocol (guint8 *data, guint32 data_len, guint8 *cmd,
   *cmd = protocol->cmd;
   *payload = g_memdup2 (data + sizeof (GoodixProtocol), length);
   *payload_len = length;
+  /* guint8 arithmetic, as encoded: the int-promoted difference went
+   * negative whenever the sum exceeded 0xaa, failing valid replies. */
   *valid_checksum =
-    0xaa - goodix_calc_checksum (data, sizeof (GoodixProtocol) + length) ==
+    (guint8) (0xaa - goodix_calc_checksum (data, sizeof (GoodixProtocol) + length)) ==
     data[sizeof (GoodixProtocol) + length];
   *valid_null_checksum =
     GOODIX_NULL_CHECKSUM == data[sizeof (GoodixProtocol) + length];
 
   return TRUE;
+}
+
+static gboolean
+goodix_pack_flags_known (guint8 flags)
+{
+  return flags == GOODIX_FLAGS_MSG_PROTOCOL || flags == GOODIX_FLAGS_TLS ||
+         flags == GOODIX_FLAGS_TLS_DATA;
+}
+
+void
+goodix_pack_reader_init (GoodixPackReader *reader)
+{
+  reader->buffer = g_byte_array_new ();
+}
+
+void
+goodix_pack_reader_clear (GoodixPackReader *reader)
+{
+  g_clear_pointer (&reader->buffer, g_byte_array_unref);
+}
+
+void
+goodix_pack_reader_reset (GoodixPackReader *reader)
+{
+  g_byte_array_set_size (reader->buffer, 0);
+}
+
+void
+goodix_pack_reader_push (GoodixPackReader *reader, const guint8 *data,
+                         gsize length)
+{
+  if (length)
+    g_byte_array_append (reader->buffer, data, length);
+}
+
+gsize
+goodix_pack_reader_buffered (const GoodixPackReader *reader)
+{
+  return reader->buffer->len;
+}
+
+GoodixPackStatus
+goodix_pack_reader_next (GoodixPackReader *reader, guint8 *flags,
+                         guint8 **payload, guint16 *payload_len,
+                         gboolean *valid_checksum, gsize *dropped)
+{
+  GByteArray *buf = reader->buffer;
+  gsize skip = 0;
+  gboolean zeros = TRUE;
+
+  *dropped = 0;
+
+  /* Resynchronise on the next plausible pack start. Zero bytes are
+   * transfer padding and are dropped silently. */
+  while (skip < buf->len && !goodix_pack_flags_known (buf->data[skip]))
+    zeros &= buf->data[skip++] == 0x00;
+  if (skip > 0)
+    {
+      g_byte_array_remove_range (buf, 0, skip);
+      if (!zeros)
+        {
+          *dropped = skip;
+          return GOODIX_PACK_DROPPED;
+        }
+    }
+  if (buf->len == 0)
+    return GOODIX_PACK_INCOMPLETE;
+
+  if (!goodix_decode_pack (buf->data, buf->len, flags, payload, payload_len,
+                           valid_checksum))
+    return GOODIX_PACK_INCOMPLETE;
+
+  g_byte_array_remove_range (buf, 0,
+                             sizeof (GoodixPack) + sizeof (guint8) + *payload_len);
+  return GOODIX_PACK_READY;
 }
