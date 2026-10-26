@@ -1,0 +1,71 @@
+# Build the Arch package from packaging/arch/PKGBUILD (the same one published
+# on the AUR) for each pushed release tag, and attach it to a GitHub release.
+name: Release Arch package
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)build, e.g. v1.94.10.m4
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Install git and gh
+        run: pacman -Syu --noconfirm --needed git github-cli
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Check the tag matches pkgver
+        working-directory: packaging/arch
+        run: |
+          source PKGBUILD
+          if [ "$TAG" != "v$pkgver" ]; then
+            echo "::error::tag $TAG does not match PKGBUILD pkgver $pkgver"
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        working-directory: packaging/arch
+        run: |
+          source PKGBUILD
+          pacman -S --noconfirm --needed "${depends[@]}" "${makedepends[@]}"
+
+      # makepkg refuses to run as root. The PKGBUILD fetches the driver at
+      # this same tag from GitHub, exactly as an AUR build does.
+      - name: Build package
+        run: |
+          useradd -m builder
+          cp -r packaging/arch /home/builder/build
+          chown -R builder: /home/builder/build
+          cd /home/builder/build
+          sudo -u builder PKGEXT=.pkg.tar.zst makepkg --noconfirm
+          mkdir "$GITHUB_WORKSPACE/out"
+          cp ./*.pkg.tar.zst "$GITHUB_WORKSPACE/out/"
+          cd "$GITHUB_WORKSPACE/out"
+          sha256sum ./*.pkg.tar.zst > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" -R "$REPO" > /dev/null 2>&1; then
+            gh release upload "$TAG" out/* -R "$REPO" --clobber
+          else
+            gh release create "$TAG" out/* -R "$REPO" --title "$TAG" \
+              --notes "Arch package built from packaging/arch/PKGBUILD at $TAG. Install with \`sudo pacman -U libfprint-goodix55b4-*.pkg.tar.zst\`, or from the AUR: \`libfprint-goodix55b4\`."
+          fi
