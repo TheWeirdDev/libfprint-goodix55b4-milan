@@ -3,7 +3,7 @@
 Versions are `<libfprint version>.m<n>`; each `v…` tag is built and published
 as a GitHub release with its section below as the release notes.
 
-## Unreleased
+## v1.94.100.m2 - 2026-10-26
 
 - Packages for Debian 12 and 13, Ubuntu 24.04 and 26.04, and Fedora 43 and
   44, attached to each GitHub release next to the Arch package. Built by
