@@ -280,13 +280,44 @@ test_reader_reset_drops_partial_reply (void)
   goodix_pack_reader_clear (&r);
 }
 
+/* A pack with a corrupted header checksum, then a good one. */
 static void
-test_reader_bad_header_checksum (void)
+push_bad_then_good (GoodixPackReader *r, GBytes *good)
 {
-  static const guint8 a[] = { 0x01 };
+  static const guint8 a[] = { 0x01, 0x02, 0x03 };
   g_autoptr(GBytes) pa = make_pack (GOODIX_FLAGS_TLS, a, sizeof (a));
   g_autofree guint8 *bad = g_memdup2 (g_bytes_get_data (pa, NULL),
                                       g_bytes_get_size (pa));
+
+  bad[3] ^= 0xff;
+  goodix_pack_reader_push (r, bad, g_bytes_get_size (pa));
+  push_bytes (r, good);
+}
+
+static void
+test_reader_bad_header_checksum_strict (void)
+{
+  static const guint8 b[] = { 0x42, 0x43 };
+  g_autoptr(GBytes) pb = make_pack (GOODIX_FLAGS_MSG_PROTOCOL, b, sizeof (b));
+  GoodixPackReader r;
+  gsize dropped = 0;
+
+  goodix_pack_reader_init (&r);
+  g_assert_false (r.lax_checksum);
+  push_bad_then_good (&r, pb);
+  /* The bad pack is skipped as garbage (header + 3-byte body = 7 bytes;
+   * no byte inside it starts a plausible pack). */
+  g_assert_cmpint (reader_next (&r, &dropped), ==, GOODIX_PACK_DROPPED);
+  g_assert_cmpuint (dropped, ==, 7);
+  expect_pack (&r, GOODIX_FLAGS_MSG_PROTOCOL, b, sizeof (b));
+  goodix_pack_reader_clear (&r);
+}
+
+static void
+test_reader_bad_header_checksum_lax (void)
+{
+  static const guint8 b[] = { 0x42 };
+  g_autoptr(GBytes) pb = make_pack (GOODIX_FLAGS_MSG_PROTOCOL, b, sizeof (b));
   g_autofree guint8 *payload = NULL;
   GoodixPackReader r;
   guint8 flags;
@@ -294,12 +325,33 @@ test_reader_bad_header_checksum (void)
   gboolean valid = TRUE;
   gsize dropped;
 
-  bad[3] ^= 0xff;
   goodix_pack_reader_init (&r);
-  goodix_pack_reader_push (&r, bad, g_bytes_get_size (pa));
+  r.lax_checksum = TRUE;
+  push_bad_then_good (&r, pb);
   g_assert_cmpint (goodix_pack_reader_next (&r, &flags, &payload, &len, &valid,
                                             &dropped), ==, GOODIX_PACK_READY);
+  g_assert_cmpuint (flags, ==, GOODIX_FLAGS_TLS);
   g_assert_false (valid);
+  expect_pack (&r, GOODIX_FLAGS_MSG_PROTOCOL, b, sizeof (b));
+  goodix_pack_reader_clear (&r);
+}
+
+static void
+test_reader_header_split_before_checksum (void)
+{
+  static const guint8 a[] = { 0x07 };
+  g_autoptr(GBytes) pa = make_pack (GOODIX_FLAGS_TLS_DATA, a, sizeof (a));
+  const guint8 *p = g_bytes_get_data (pa, NULL);
+  GoodixPackReader r;
+  gsize dropped;
+
+  /* Fewer than 4 bytes: the checksum cannot be judged yet, so wait. */
+  goodix_pack_reader_init (&r);
+  goodix_pack_reader_push (&r, p, 3);
+  g_assert_cmpint (reader_next (&r, &dropped), ==, GOODIX_PACK_INCOMPLETE);
+  g_assert_cmpuint (goodix_pack_reader_buffered (&r), ==, 3);
+  goodix_pack_reader_push (&r, p + 3, g_bytes_get_size (pa) - 3);
+  expect_pack (&r, GOODIX_FLAGS_TLS_DATA, a, sizeof (a));
   goodix_pack_reader_clear (&r);
 }
 
@@ -319,7 +371,11 @@ main (int argc, char **argv)
   g_test_add_func ("/proto/reader/resync", test_reader_resync);
   g_test_add_func ("/proto/reader/reset-drops-partial-reply",
                    test_reader_reset_drops_partial_reply);
-  g_test_add_func ("/proto/reader/bad-header-checksum",
-                   test_reader_bad_header_checksum);
+  g_test_add_func ("/proto/reader/bad-header-checksum-strict",
+                   test_reader_bad_header_checksum_strict);
+  g_test_add_func ("/proto/reader/bad-header-checksum-lax",
+                   test_reader_bad_header_checksum_lax);
+  g_test_add_func ("/proto/reader/header-split-before-checksum",
+                   test_reader_header_split_before_checksum);
   return g_test_run ();
 }

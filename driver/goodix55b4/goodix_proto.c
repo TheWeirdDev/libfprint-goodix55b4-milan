@@ -153,6 +153,7 @@ void
 goodix_pack_reader_init (GoodixPackReader *reader)
 {
   reader->buffer = g_byte_array_new ();
+  reader->lax_checksum = FALSE;
 }
 
 void
@@ -192,10 +193,22 @@ goodix_pack_reader_next (GoodixPackReader *reader, guint8 *flags,
 
   *dropped = 0;
 
-  /* Resynchronise on the next plausible pack start. Zero bytes are
-   * transfer padding and are dropped silently. */
-  while (skip < buf->len && !goodix_pack_flags_known (buf->data[skip]))
-    zeros &= buf->data[skip++] == 0x00;
+  /* Resynchronise on the next plausible pack start: a known type and, in
+   * strict mode, a matching header checksum. Zero bytes are transfer
+   * padding and are dropped silently. */
+  while (skip < buf->len)
+    {
+      const guint8 *h = buf->data + skip;
+      gsize left = buf->len - skip;
+
+      if (goodix_pack_flags_known (h[0]) &&
+          (reader->lax_checksum || left < sizeof (GoodixPack) + 1 ||
+           goodix_calc_checksum ((guint8 *) h, sizeof (GoodixPack)) ==
+           h[sizeof (GoodixPack)]))
+        break;
+      zeros &= h[0] == 0x00;
+      skip++;
+    }
   if (skip > 0)
     {
       g_byte_array_remove_range (buf, 0, skip);

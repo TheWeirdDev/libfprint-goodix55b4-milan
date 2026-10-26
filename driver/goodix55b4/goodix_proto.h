@@ -206,6 +206,9 @@ gboolean goodix_decode_protocol (guint8   *data,
 typedef struct
 {
   GByteArray *buffer;
+  /* FALSE (default): a pack whose header checksum is wrong is treated as
+   * garbage and skipped. TRUE: it is returned with *valid_checksum FALSE. */
+  gboolean    lax_checksum;
 } GoodixPackReader;
 
 typedef enum {
@@ -228,9 +231,10 @@ void goodix_pack_reader_push (GoodixPackReader *reader,
 gsize goodix_pack_reader_buffered (const GoodixPackReader *reader);
 
 /* Takes the next pack. On GOODIX_PACK_READY, *payload is newly allocated
- * and *valid_checksum tells whether the header checksum matched. Bytes
- * that do not start a known pack type are skipped up to the next byte
- * that does: zero padding silently, anything else is reported as
+ * and *valid_checksum tells whether the header checksum matched (always
+ * TRUE unless lax_checksum). Bytes that do not start a known pack type, or
+ * start one with a wrong header checksum, are skipped up to the next
+ * plausible start: zero padding silently, anything else is reported as
  * GOODIX_PACK_DROPPED with *dropped set to the number of bytes skipped. */
 GoodixPackStatus goodix_pack_reader_next (GoodixPackReader *reader,
                                           guint8           *flags,

@@ -1447,6 +1447,14 @@ goodix_dev_init (FpDevice *dev, GError **error)
   if (!priv->reader.buffer)
     goodix_pack_reader_init (&priv->reader);
   goodix_pack_reader_reset (&priv->reader);
+  /* Packs with a bad header checksum are dropped (all of 70+ logged
+   * replies were valid); GOODIX55B4_LAX_CHECKSUM=1 restores the old
+   * accept-and-warn behaviour should some firmware not set it. */
+  priv->reader.lax_checksum =
+    g_strcmp0 (g_getenv ("GOODIX55B4_LAX_CHECKSUM"), "1") == 0;
+  if (priv->reader.lax_checksum)
+    fp_warn ("GOODIX55B4_LAX_CHECKSUM=1: accepting packs with bad header "
+             "checksums");
   /* Was replaced without unref on every open. */
   g_clear_object (&priv->transfer_cancel_tkn);
   priv->transfer_cancel_tkn = g_cancellable_new ();
