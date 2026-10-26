@@ -4,3 +4,11 @@
 /packaging/arch/libfprint/
 /packaging/arch/*.pkg.tar.*
 __pycache__/
+# makepkg output and its clone of this repo (packaging/arch)
+/packaging/arch/*.pkg.tar
+/packaging/arch/makepkg.log
+/packaging/arch/driver/
+/packaging/arch/*.rules
+# images written by the libfprint examples
+/finger.pgm
+/enrolled.pgm

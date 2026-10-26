@@ -7,6 +7,8 @@
  * version 2.1 of the License, or (at your option) any later version.
  */
 
+#define FP_COMPONENT "goodix55b4"
+
 #include "goodix55b4-study.h"
 
 #include "milan/print.h"
@@ -14,6 +16,8 @@
 #include <errno.h>
 #include <gio/gio.h>
 #include <string.h>
+
+#include "fpi-log.h"
 
 /* "G55BSD" + format version; bump on any layout change. */
 static const char STUDY_MAGIC[8] = { 'G', '5', '5', 'B', 'S', 'D', '0', '1' };
@@ -120,4 +124,74 @@ goodix55b4_study_save (const char *dir, const char *key, GBytes *studied,
   /* temp file + rename: a crash leaves the previous entry intact */
   return g_file_set_contents_full (path, (const gchar *) buf, sizeof (h) + size,
                                    G_FILE_SET_CONTENTS_CONSISTENT, 0600, error);
+}
+
+Goodix55b4StudyPolicy
+goodix55b4_study_policy_from_env (void)
+{
+  const char *policy = g_getenv ("GOODIX55B4_STUDY_POLICY");
+
+  if (g_strcmp0 (g_getenv ("GOODIX55B4_NO_STUDY"), "1") == 0)
+    return GOODIX55B4_STUDY_OFF;
+  if (!policy || !*policy || g_strcmp0 (policy, "native") == 0)
+    return GOODIX55B4_STUDY_NATIVE;
+  if (g_strcmp0 (policy, "bounded") == 0)
+    return GOODIX55B4_STUDY_BOUNDED;
+  if (g_strcmp0 (policy, "off") == 0)
+    return GOODIX55B4_STUDY_OFF;
+  fp_warn ("unknown GOODIX55B4_STUDY_POLICY '%s', using native", policy);
+  return GOODIX55B4_STUDY_NATIVE;
+}
+
+const char *
+goodix55b4_study_policy_name (Goodix55b4StudyPolicy policy)
+{
+  switch (policy)
+    {
+    case GOODIX55B4_STUDY_BOUNDED:
+      return "bounded";
+    case GOODIX55B4_STUDY_OFF:
+      return "off";
+    case GOODIX55B4_STUDY_NATIVE:
+    default:
+      return "native";
+    }
+}
+
+gboolean
+goodix55b4_study_should_store (Goodix55b4StudyPolicy           policy,
+                               const GoodixMilanRuntimeOutput *out,
+                               GBytes                         *matched)
+{
+  if (policy == GOODIX55B4_STUDY_OFF ||
+      out->status != GOODIX_MILAN_RUNTIME_MATCH || !out->final_candidate)
+    return FALSE;
+  /* Was written after every match, changed or not. */
+  if (matched && g_bytes_equal (out->final_candidate, matched))
+    return FALSE;
+  if (policy == GOODIX55B4_STUDY_NATIVE)
+    return TRUE;
+
+  /* Bounded: a confident match that only adds a feature. Replacement
+   * (REPLACE, REPLACE_NO_RELATION, GEOMETRIC) and lifecycle-only updates
+   * (NONE) are not kept, so nothing enrolled is ever overwritten and the
+   * template is final once full. */
+  return out->study_action == GOODIX_MILAN_STUDY_APPEND &&
+         out->score >= GOODIX55B4_STUDY_BOUNDED_MIN_SCORE;
+}
+
+/* On the writer's thread. */
+static gboolean
+study_write (const char *key, gpointer item, gpointer user_data,
+             gboolean *written, GError **error)
+{
+  *written = goodix55b4_study_save (user_data, key, item, error);
+  return *written;
+}
+
+Goodix55b4Writer *
+goodix55b4_study_writer_new (const char *dir)
+{
+  return goodix55b4_writer_new ("studied template", study_write,
+                                g_strdup (dir), g_free);
 }

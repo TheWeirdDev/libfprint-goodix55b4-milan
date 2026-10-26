@@ -183,6 +183,14 @@ status, flashes if needed, and waits for a finger. It saves the image as
 Builds a libfprint with only this driver in `.build/libfprint` and prints the
 paths of the example programs.
 
+    scripts/run-tests.sh                              # unit tests, ASan + UBSan
+    GOODIX55B4_DATASET=~/55b4-set scripts/run-tests.sh  # + tests on real frames
+    scripts/run-tsan.sh                               # threaded code, TSan
+
+The real-frame tests replay captures made with `tools/capture_dataset_55b4.py`
+(enroll, verify, identify, impostors, study policies). Fingerprints are
+personal data: keep the dataset outside the repository.
+
 ## Layout
 
 - `driver/goodix55b4/`: the libfprint driver (`goodix55b4.c`, USB/TLS in
@@ -208,3 +216,39 @@ Re-enrolling a finger starts from scratch. Deleting the directory goes back to
 the enrolled templates; `GOODIX55B4_NO_STUDY=1` turns learning off. Offline on
 the 3-finger set this raised single-attempt identify from 95% to 97% (12-touch
 enrolment) and from 78% to 88% (6 touches), with no false accepts.
+
+Learned templates are written in the background, and only when they changed.
+
+`GOODIX55B4_STUDY_POLICY` chooses what is learned:
+
+- `native` (default): as the Windows driver. Each match adds the touch to the
+  template until it holds 40 features, then replaces the feature it improves
+  on most, which can be one of the enrolled ones. Adapts indefinitely.
+- `bounded`: learns only from confident matches (score 30 or more) and only
+  by adding features. Enrolled features are never replaced and the template
+  stops changing once full (after about 28 confident matches). This bounds
+  what a wrong-finger accept could ever add, but stops adapting once full.
+- `off`: matches the enrolled templates only (same as `GOODIX55B4_NO_STUDY=1`).
+
+fprintd does not see your shell's environment; set it with
+`sudo systemctl edit fprintd`:
+
+    [Service]
+    Environment=GOODIX55B4_STUDY_POLICY=bounded
+
+Switching policy keeps the learned templates; delete
+`/var/lib/fprint/goodix55b4/studied/` to start the new policy from the enrolled
+prints.
+
+## Troubleshooting switches
+
+Set like `GOODIX55B4_STUDY_POLICY` above (for fprintd, with
+`sudo systemctl edit fprintd`). Both are logged as warnings when active.
+
+- `GOODIX55B4_LAX_CHECKSUM=1`: accept USB packs with a bad header checksum and
+  images whose CRC does not match. By default such data is dropped (packs) or
+  read again (images, up to 3 times), as all known firmware sets both.
+- `GOODIX55B4_TLS_CIPHERS=<OpenSSL cipher string>`: the TLS suites offered to
+  the sensor. The default is the one the 55b4/5584 firmware uses,
+  `PSK-AES128-CBC-SHA256`; if a firmware fails the handshake with
+  "no shared cipher", try `PSK`.

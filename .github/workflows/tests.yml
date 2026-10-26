@@ -1,0 +1,44 @@
+# Unit tests (ASan + UBSan) and the threaded code under TSan, on every push
+# and pull request; release.yml runs it before building packages. The
+# real-frame suite needs a fingerprint dataset, which is personal data and
+# not available here, so it is skipped.
+name: Tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_call:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+      # LeakSanitizer needs ptrace and setarch -R (for TSan) needs
+      # personality(), both blocked by Docker's default seccomp profile.
+      options: --security-opt seccomp=unconfined
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install git
+        run: pacman -Syu --noconfirm --needed git
+
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        working-directory: packaging/arch
+        run: |
+          source ./PKGBUILD
+          pacman -S --noconfirm --needed "${depends[@]}" "${makedepends[@]}" "${checkdepends[@]}" util-linux
+
+      - name: Unit tests (ASan, UBSan)
+        run: scripts/run-tests.sh
+
+      - name: Threaded code (TSan)
+        run: scripts/run-tsan.sh 10
+
+      - name: Test log
+        if: failure()
+        run: cat .build/tests/meson-logs/testlog.txt || true

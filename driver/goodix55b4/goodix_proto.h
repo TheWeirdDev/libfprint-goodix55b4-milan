@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include <glib.h>
+
 #define GOODIX_EP_IN_MAX_BUF_SIZE (0x10000)
 #define GOODIX_EP_OUT_MAX_BUF_SIZE (0x40)
 
@@ -149,11 +151,21 @@ typedef struct __attribute__((__packed__)) _GoodixPresetPsk {
   guint32 offset;
 } GoodixPresetPsk;
 
+/* @deprecated: wrong layout (the reply has no offset field; reading it
+ * returned PSK bytes). Use goodix_parse_preset_psk_read(). */
 typedef struct __attribute__((__packed__)) _GoodixPresetPskResp {
   guint32 flags;
   guint32 length;
   guint32 offset;
 } GoodixPresetPskResp;
+
+/* Reply to 0xe4 (preset PSK read): status byte, then this, then the PSK
+ * (or its hash) of `length` bytes. */
+typedef struct __attribute__((__packed__)) _GoodixPresetPskReadReply {
+  guint8  status;
+  guint32 flags;
+  guint32 length;
+} GoodixPresetPskReadReply;
 
 typedef struct __attribute__((__packed__)) _GoodixDefault
 {
@@ -198,3 +210,76 @@ gboolean goodix_decode_protocol (guint8   *data,
                                  guint16  *payload_len,
                                  gboolean *valid_checksum,
                                  gboolean *valid_null_checksum);
+
+typedef enum {
+  GOODIX_PSK_READ_OK,
+  GOODIX_PSK_READ_FAILED,  /* the device answered with a non-zero status */
+  GOODIX_PSK_READ_INVALID, /* malformed reply */
+} GoodixPskReadStatus;
+
+/* Parses the reply to 0xe4. On OK, *psk points into data. */
+GoodixPskReadStatus goodix_parse_preset_psk_read (const guint8  *data,
+                                                  gsize          length,
+                                                  guint32       *flags,
+                                                  const guint8 **psk,
+                                                  guint32       *psk_len);
+
+/* CRC-32/MPEG-2: poly 0x04c11db7, init 0xffffffff, not reflected, no final
+ * xor. */
+guint32 goodix_crc32_mpeg2 (const guint8 *data,
+                            gsize         length);
+
+typedef enum {
+  GOODIX_IMAGE_CRC_OK,
+  GOODIX_IMAGE_CRC_ABSENT,   /* no 4-byte trailer after the pixels */
+  GOODIX_IMAGE_CRC_MISMATCH,
+} GoodixImageCrcStatus;
+
+/* Checks a decrypted image: `packed_length` bytes of packed pixels, then
+ * their CRC-32/MPEG-2 as two big-endian 16-bit halves, low half first
+ * (found on 55b4 firmware 10041: crc 9e30b1d1 is sent b1 d1 9e 30). */
+GoodixImageCrcStatus goodix_image_check_crc (const guint8 *data,
+                                             gsize         length,
+                                             gsize         packed_length);
+
+/* Reassembles packs from the IN endpoint: a pack may span transfers and a
+ * transfer may hold more than one pack. */
+typedef struct
+{
+  GByteArray *buffer;
+  /* FALSE (default): a pack whose header checksum is wrong is treated as
+   * garbage and skipped. TRUE: it is returned with *valid_checksum FALSE. */
+  gboolean    lax_checksum;
+} GoodixPackReader;
+
+typedef enum {
+  GOODIX_PACK_INCOMPLETE, /* need more data */
+  GOODIX_PACK_READY,      /* a pack was taken */
+  GOODIX_PACK_DROPPED,    /* unparseable bytes were discarded */
+} GoodixPackStatus;
+
+void goodix_pack_reader_init (GoodixPackReader *reader);
+
+void goodix_pack_reader_clear (GoodixPackReader *reader);
+
+/* Drops buffered bytes, e.g. the rest of the reply to an aborted command. */
+void goodix_pack_reader_reset (GoodixPackReader *reader);
+
+void goodix_pack_reader_push (GoodixPackReader *reader,
+                              const guint8     *data,
+                              gsize             length);
+
+gsize goodix_pack_reader_buffered (const GoodixPackReader *reader);
+
+/* Takes the next pack. On GOODIX_PACK_READY, *payload is newly allocated
+ * and *valid_checksum tells whether the header checksum matched (always
+ * TRUE unless lax_checksum). Bytes that do not start a known pack type, or
+ * start one with a wrong header checksum, are skipped up to the next
+ * plausible start: zero padding silently, anything else is reported as
+ * GOODIX_PACK_DROPPED with *dropped set to the number of bytes skipped. */
+GoodixPackStatus goodix_pack_reader_next (GoodixPackReader *reader,
+                                          guint8           *flags,
+                                          guint8          **payload,
+                                          guint16          *payload_len,
+                                          gboolean         *valid_checksum,
+                                          gsize            *dropped);

@@ -339,6 +339,9 @@ gboolean goodix_dev_deinit (FpDevice *dev,
                             GError  **error);
 
 void goodix_reset_state (FpDevice *dev);
+/* Drops the pending command (its callback is not called) and any partly
+ * received reply, e.g. on cancellation. */
+void goodix_abort_command (FpDevice *dev);
 void goodix_cancel_receive(FpDevice *dev);
 
 // ---- DEV SECTION END ----
@@ -351,9 +354,6 @@ void goodix_read_tls (FpDevice         *dev,
                       GoodixTlsCallback callback,
                       gpointer          user_data);
 
-void goodix_tls_run_state (FpiSsm   *ssm,
-                           FpDevice *dev);
-
 void goodix_tls (FpDevice          *dev,
                  GoodixNoneCallback callback,
                  gpointer           user_data);
@@ -365,8 +365,5 @@ void goodix_tls_read_image (FpDevice           *dev,
                             GoodixImageCallback callback,
                             gpointer            user_data);
 
-void goodix_tls_decrypt_image (FpDevice *dev,
-                               guint8  **data,
-                               guint16  *len);
 
 // ---- TLS SECTION END ----

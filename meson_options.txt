@@ -1,0 +1,6 @@
+option('libfprint_src', type: 'string', value: '',
+       description: 'libfprint source tree (headers)')
+option('libfprint_build', type: 'string', value: '',
+       description: 'libfprint build directory (libfprint-2.so, generated headers)')
+option('dataset', type: 'string', value: '',
+       description: 'directory of real 55b4 captures for the dataset tests (not in git)')

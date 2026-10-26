@@ -20,6 +20,7 @@
 #include <gio/gio.h>
 #include <glib.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "goodix_proto.h"
 
@@ -130,11 +131,168 @@ goodix_decode_protocol (guint8 *data, guint32 data_len, guint8 *cmd,
   *cmd = protocol->cmd;
   *payload = g_memdup2 (data + sizeof (GoodixProtocol), length);
   *payload_len = length;
+  /* guint8 arithmetic, as encoded: the int-promoted difference went
+   * negative whenever the sum exceeded 0xaa, failing valid replies. */
   *valid_checksum =
-    0xaa - goodix_calc_checksum (data, sizeof (GoodixProtocol) + length) ==
+    (guint8) (0xaa - goodix_calc_checksum (data, sizeof (GoodixProtocol) + length)) ==
     data[sizeof (GoodixProtocol) + length];
   *valid_null_checksum =
     GOODIX_NULL_CHECKSUM == data[sizeof (GoodixProtocol) + length];
 
   return TRUE;
+}
+
+static gboolean
+goodix_pack_flags_known (guint8 flags)
+{
+  return flags == GOODIX_FLAGS_MSG_PROTOCOL || flags == GOODIX_FLAGS_TLS ||
+         flags == GOODIX_FLAGS_TLS_DATA;
+}
+
+void
+goodix_pack_reader_init (GoodixPackReader *reader)
+{
+  reader->buffer = g_byte_array_new ();
+  reader->lax_checksum = FALSE;
+}
+
+void
+goodix_pack_reader_clear (GoodixPackReader *reader)
+{
+  g_clear_pointer (&reader->buffer, g_byte_array_unref);
+}
+
+void
+goodix_pack_reader_reset (GoodixPackReader *reader)
+{
+  g_byte_array_set_size (reader->buffer, 0);
+}
+
+void
+goodix_pack_reader_push (GoodixPackReader *reader, const guint8 *data,
+                         gsize length)
+{
+  if (length)
+    g_byte_array_append (reader->buffer, data, length);
+}
+
+gsize
+goodix_pack_reader_buffered (const GoodixPackReader *reader)
+{
+  return reader->buffer->len;
+}
+
+GoodixPackStatus
+goodix_pack_reader_next (GoodixPackReader *reader, guint8 *flags,
+                         guint8 **payload, guint16 *payload_len,
+                         gboolean *valid_checksum, gsize *dropped)
+{
+  GByteArray *buf = reader->buffer;
+  gsize skip = 0;
+  gboolean zeros = TRUE;
+
+  *dropped = 0;
+
+  /* Resynchronise on the next plausible pack start: a known type and, in
+   * strict mode, a matching header checksum. Zero bytes are transfer
+   * padding and are dropped silently. */
+  while (skip < buf->len)
+    {
+      const guint8 *h = buf->data + skip;
+      gsize left = buf->len - skip;
+
+      if (goodix_pack_flags_known (h[0]) &&
+          (reader->lax_checksum || left < sizeof (GoodixPack) + 1 ||
+           goodix_calc_checksum ((guint8 *) h, sizeof (GoodixPack)) ==
+           h[sizeof (GoodixPack)]))
+        break;
+      zeros &= h[0] == 0x00;
+      skip++;
+    }
+  if (skip > 0)
+    {
+      g_byte_array_remove_range (buf, 0, skip);
+      if (!zeros)
+        {
+          *dropped = skip;
+          return GOODIX_PACK_DROPPED;
+        }
+    }
+  if (buf->len == 0)
+    return GOODIX_PACK_INCOMPLETE;
+
+  if (!goodix_decode_pack (buf->data, buf->len, flags, payload, payload_len,
+                           valid_checksum))
+    return GOODIX_PACK_INCOMPLETE;
+
+  g_byte_array_remove_range (buf, 0,
+                             sizeof (GoodixPack) + sizeof (guint8) + *payload_len);
+  return GOODIX_PACK_READY;
+}
+
+GoodixPskReadStatus
+goodix_parse_preset_psk_read (const guint8 *data, gsize length, guint32 *flags,
+                              const guint8 **psk, guint32 *psk_len)
+{
+  GoodixPresetPskReadReply reply;
+
+  if (!data || length < 1)
+    return GOODIX_PSK_READ_INVALID;
+  if (data[0] != 0x00)
+    return GOODIX_PSK_READ_FAILED;
+  if (length < sizeof (reply))
+    return GOODIX_PSK_READ_INVALID;
+  memcpy (&reply, data, sizeof (reply));
+  *flags = GUINT32_FROM_LE (reply.flags);
+  *psk_len = GUINT32_FROM_LE (reply.length);
+  if (*psk_len != length - sizeof (reply))
+    return GOODIX_PSK_READ_INVALID;
+  *psk = data + sizeof (reply);
+  return GOODIX_PSK_READ_OK;
+}
+
+static guint32 crc32_mpeg2_table[256];
+
+static void
+crc32_mpeg2_init (void)
+{
+  for (guint32 i = 0; i < 256; i++)
+    {
+      guint32 crc = i << 24;
+
+      for (int b = 0; b < 8; b++)
+        crc = (crc & 0x80000000u) ? (crc << 1) ^ 0x04c11db7u : crc << 1;
+      crc32_mpeg2_table[i] = crc;
+    }
+}
+
+guint32
+goodix_crc32_mpeg2 (const guint8 *data, gsize length)
+{
+  static gsize table_ready = 0;
+  guint32 crc = 0xffffffffu;
+
+  if (g_once_init_enter (&table_ready))
+    {
+      crc32_mpeg2_init ();
+      g_once_init_leave (&table_ready, 1);
+    }
+  for (gsize i = 0; i < length; i++)
+    crc = (crc << 8) ^ crc32_mpeg2_table[(crc >> 24) ^ data[i]];
+  return crc;
+}
+
+GoodixImageCrcStatus
+goodix_image_check_crc (const guint8 *data, gsize length, gsize packed_length)
+{
+  const guint8 *t;
+  guint32 stored;
+
+  if (!data || length < packed_length + 4)
+    return GOODIX_IMAGE_CRC_ABSENT;
+  t = data + packed_length;
+  stored = ((guint32) t[2] << 24) | ((guint32) t[3] << 16) |
+           ((guint32) t[0] << 8) | t[1];
+  return stored == goodix_crc32_mpeg2 (data, packed_length) ?
+         GOODIX_IMAGE_CRC_OK : GOODIX_IMAGE_CRC_MISMATCH;
 }

@@ -27,7 +27,11 @@ env:
   REF: ${{ github.event_name == 'push' && github.ref_name || inputs.tag || github.ref }}
 
 jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
   notes:
+    needs: tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -214,13 +218,17 @@ jobs:
           - Fedora: `sudo dnf install --allowerasing ./libfprint-goodix55b4-*.fc<release>.x86_64.rpm`, with the file for your release
           EOF
           if gh release view "$TAG" -R "$REPO" > /dev/null 2>&1; then
-            # Rebuild: replace the notes and all assets.
+            # Rebuild: replace the notes and assets in place (deleting all
+            # assets first left the release empty while uploading), then drop
+            # assets this build no longer produces.
             gh release edit "$TAG" -R "$REPO" --notes-file notes.md
+            gh release upload "$TAG" out/* -R "$REPO" --clobber
             gh release view "$TAG" -R "$REPO" --json assets --jq '.assets[].name' |
               while read -r asset; do
-                gh release delete-asset "$TAG" "$asset" -R "$REPO" --yes
+                if [ ! -e "out/$asset" ]; then
+                  gh release delete-asset "$TAG" "$asset" -R "$REPO" --yes
+                fi
               done
-            gh release upload "$TAG" out/* -R "$REPO"
           else
             gh release create "$TAG" out/* -R "$REPO" --title "$TAG" \
               --notes-file notes.md

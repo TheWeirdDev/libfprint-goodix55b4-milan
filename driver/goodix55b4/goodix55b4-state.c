@@ -7,14 +7,29 @@
  * version 2.1 of the License, or (at your option) any later version.
  */
 
+#define FP_COMPONENT "goodix55b4"
+
 #include "goodix55b4-state.h"
+#include "goodix55b4-state-layout.h"
+#include "goodix55b4-writer.h"
 
 #include <errno.h>
 #include <gio/gio.h>
+#include <pthread.h>
 #include <string.h>
+
+#include "fpi-log.h"
 
 /* "G55BST" + format version; bump on any layout change. */
 static const char STATE_MAGIC[8] = { 'G', '5', '5', 'B', 'S', 'T', '0', '1' };
+
+/* The layout STATE_MAGIC "01" files were written with. If this fails, the
+ * engine state structs changed: bump STATE_MAGIC (old files are then
+ * ignored and the engine starts afresh) and set the new value, printed by
+ * printf ("0x%08xu", GOODIX55B4_STATE_LAYOUT). */
+_Static_assert (GOODIX55B4_STATE_LAYOUT == 0x8a03c60bu,
+                "engine state layout changed: bump STATE_MAGIC and update "
+                "the pinned layout value");
 
 typedef struct __attribute__((packed))
 {
@@ -98,6 +113,25 @@ goodix55b4_state_new_generation (Goodix55b4EngineState *s)
   s->profile.setup_not_ready = 0;
 }
 
+void
+goodix55b4_state_apply_output (Goodix55b4EngineState          *s,
+                               const GoodixMilanRuntimeOutput *out)
+{
+  if (out->preprocess_state_valid &&
+      out->status != GOODIX_MILAN_RUNTIME_CANCELLED)
+    {
+      s->state = out->preprocess_state;
+      s->profile = out->profile_state;
+    }
+  else if (out->setup_state_valid)
+    {
+      s->profile.setup_initialized = out->profile_state.setup_initialized;
+      s->profile.setup_refresh_pending =
+        out->profile_state.setup_refresh_pending;
+      s->profile.setup_not_ready = out->profile_state.setup_not_ready;
+    }
+}
+
 static void
 digest (const Goodix55b4EngineState *s, guint8 out[32])
 {
@@ -170,4 +204,105 @@ goodix55b4_state_save (const Goodix55b4EngineState *s, const char *path,
   /* g_file_set_contents writes to a temp file and renames: no torn state. */
   return g_file_set_contents_full (path, (const gchar *) buf, len,
                                    G_FILE_SET_CONTENTS_CONSISTENT, 0600, error);
+}
+
+struct _Goodix55b4StateSaver
+{
+  gchar            *path;
+  guint16           subtype;
+  Goodix55b4Writer *writer;
+
+  /* Digest of the file's contents, shared with the writer's thread. */
+  pthread_mutex_t   last_lock;
+  guint8            last[32];
+  gboolean          have_last;
+};
+
+/* On the writer's thread. */
+static gboolean
+saver_write (const char *key, gpointer item, gpointer user_data,
+             gboolean *written, GError **error)
+{
+  Goodix55b4StateSaver *saver = user_data;
+  const Goodix55b4EngineState *s = item;
+  guint8 sum[32];
+  gboolean unchanged;
+
+  digest (s, sum);
+  pthread_mutex_lock (&saver->last_lock);
+  unchanged = saver->have_last && memcmp (sum, saver->last, sizeof (sum)) == 0;
+  pthread_mutex_unlock (&saver->last_lock);
+  if (unchanged)
+    {
+      *written = FALSE;
+      return TRUE;
+    }
+  if (!goodix55b4_state_save (s, saver->path, saver->subtype, error))
+    return FALSE;
+
+  pthread_mutex_lock (&saver->last_lock);
+  memcpy (saver->last, sum, sizeof (sum));
+  saver->have_last = TRUE;
+  pthread_mutex_unlock (&saver->last_lock);
+  *written = TRUE;
+  return TRUE;
+}
+
+Goodix55b4StateSaver *
+goodix55b4_state_saver_new (const char *path, guint16 subtype)
+{
+  Goodix55b4StateSaver *saver = g_new0 (Goodix55b4StateSaver, 1);
+
+  saver->path = g_strdup (path);
+  saver->subtype = subtype;
+  pthread_mutex_init (&saver->last_lock, NULL);
+  saver->writer = goodix55b4_writer_new ("engine state", saver_write, saver,
+                                         NULL);
+  return saver;
+}
+
+void
+goodix55b4_state_saver_flush (Goodix55b4StateSaver *saver)
+{
+  goodix55b4_writer_flush (saver->writer);
+}
+
+void
+goodix55b4_state_saver_free (Goodix55b4StateSaver *saver)
+{
+  if (!saver)
+    return;
+  /* Flushes first: the writer's thread uses saver until then. */
+  goodix55b4_writer_free (saver->writer);
+  pthread_mutex_destroy (&saver->last_lock);
+  g_free (saver->path);
+  g_free (saver);
+}
+
+void
+goodix55b4_state_saver_mark_saved (Goodix55b4StateSaver        *saver,
+                                   const Goodix55b4EngineState *s)
+{
+  guint8 sum[32];
+
+  digest (s, sum);
+  pthread_mutex_lock (&saver->last_lock);
+  memcpy (saver->last, sum, sizeof (sum));
+  saver->have_last = TRUE;
+  pthread_mutex_unlock (&saver->last_lock);
+}
+
+guint
+goodix55b4_state_saver_writes (Goodix55b4StateSaver *saver)
+{
+  return goodix55b4_writer_writes (saver->writer);
+}
+
+void
+goodix55b4_state_saver_queue (Goodix55b4StateSaver        *saver,
+                              const Goodix55b4EngineState *s)
+{
+  /* A copy: the caller keeps changing its state. ~212 KB, heap only. */
+  goodix55b4_writer_queue (saver->writer, "state", g_memdup2 (s, sizeof (*s)),
+                           g_free);
 }

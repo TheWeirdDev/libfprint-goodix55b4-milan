@@ -20,6 +20,7 @@
 #include "goodix_proto.h"
 #include "goodix55b4.h"
 #include "goodix55b4-calib.h"
+#include "goodix55b4-enroll.h"
 #include "goodix55b4-state.h"
 #include "goodix55b4-study.h"
 #include "milan/match/match.h"
@@ -33,8 +34,8 @@
  * (milan-port N3). Override the directory with GOODIX55B4_STATE_DIR. */
 #define GOODIX55B4_STATE_DIR_DEFAULT "/var/lib/fprint/goodix55b4"
 #define GOODIX55B4_STATE_FILE "engine-state.bin"
-/* Studied templates (goodix55b4-study.h); GOODIX55B4_NO_STUDY=1 matches
- * against the enrolled templates only and learns nothing. */
+/* Studied templates (goodix55b4-study.h); GOODIX55B4_STUDY_POLICY picks
+ * native (default), bounded or off (= GOODIX55B4_NO_STUDY=1). */
 #define GOODIX55B4_STUDY_SUBDIR "studied"
 
 struct _FpiDeviceGoodix55b4
@@ -54,18 +55,22 @@ struct _FpiDeviceGoodix55b4
   gboolean           usb_reset_tried; /* during the current open */
   FpiSsm            *scan_ssm;
   GSource           *up_watchdog;
+  gboolean           up_forced;  /* the watchdog re-armed this finger-up wait */
+  guint              bad_images; /* consecutive image CRC mismatches */
 
   /* Milan engine. Heap-allocated: the state is ~212 KB and GObject
    * instance structs must stay below 64 KB. */
   Goodix55b4EngineState *engine;
-  gchar                *state_path;
+  Goodix55b4StateSaver *saver;      /* writes the state file, per open */
   guint64               epoch;
   GTask                *engine_task;
-  GoodixMilanEnrollmentTransaction *enroll_tx;
-  guint                 enroll_bad_records;
-  guint                 enroll_bad_continue;
+  Goodix55b4Enroll      enroll;
   GPtrArray            *gallery_prints; /* FpPrint per gallery index (identify) */
   GPtrArray            *gallery_keys;   /* study key per gallery index, or NULL */
+  GPtrArray            *gallery_templates; /* GBytes matched per index, or NULL */
+  Goodix55b4StudyPolicy study_policy;   /* read at open */
+  Goodix55b4Writer     *study_writer;   /* writes studied templates, per open */
+  GHashTable           *studied;        /* key -> latest studied GBytes */
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceGoodix55b4, fpi_device_goodix55b4, FPI,
@@ -100,6 +105,52 @@ decode_frame (const guint8 *data, guint16 len, guint16 *out)
       out[p++] = (c[4] << 4) | (c[5] >> 4);
     }
   return TRUE;
+}
+
+/* Images failing their CRC are read again this many times. */
+#define GOODIX55B4_IMAGE_RETRIES (3)
+
+/* Checks the image CRC (frames were taken without it). Returns TRUE to use
+ * the frame; otherwise it has re-requested the image (jump to `retry`) or
+ * failed the state machine. */
+static gboolean
+image_crc_ok (FpiDeviceGoodix55b4 *self, FpiSsm *ssm, const guint8 *data,
+              guint16 len, int retry, const char *what)
+{
+  switch (goodix_image_check_crc (data, len, GOODIX55B4_PACKED_BYTES))
+    {
+    case GOODIX_IMAGE_CRC_OK:
+      self->bad_images = 0;
+      return TRUE;
+
+    case GOODIX_IMAGE_CRC_ABSENT:
+      fp_dbg ("%s image without CRC (%u bytes)", what, len);
+      return TRUE;
+
+    case GOODIX_IMAGE_CRC_MISMATCH:
+      break;
+    }
+
+  /* Same escape hatch as for pack checksums (goodix.c). */
+  if (g_strcmp0 (g_getenv ("GOODIX55B4_LAX_CHECKSUM"), "1") == 0)
+    {
+      fp_warn ("%s image CRC mismatch, used anyway (GOODIX55B4_LAX_CHECKSUM)",
+               what);
+      return TRUE;
+    }
+  if (++self->bad_images <= GOODIX55B4_IMAGE_RETRIES)
+    {
+      fp_warn ("%s image CRC mismatch, reading it again (%u/%d)", what,
+               self->bad_images, GOODIX55B4_IMAGE_RETRIES);
+      fpi_ssm_jump_to_state (ssm, retry);
+      return FALSE;
+    }
+  self->bad_images = 0;
+  fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
+                         FP_DEVICE_ERROR_PROTO,
+                         "Corrupted %s image (CRC mismatch, %d times)", what,
+                         GOODIX55B4_IMAGE_RETRIES + 1));
+  return FALSE;
 }
 
 static int
@@ -387,6 +438,8 @@ act_setup_frame (FpDevice *dev, guint8 *data, guint16 len, gpointer ssm,
       fpi_ssm_mark_failed (ssm, error);
       return;
     }
+  if (!image_crc_ok (self, ssm, data, len, ACT_SETUP_FRAME, "setup"))
+    return;
   g_clear_pointer (&self->setup, g_free);
   self->setup = g_new (guint16, GOODIX55B4_PIXELS);
   if (!decode_frame (data, len, self->setup))
@@ -494,14 +547,18 @@ static void
 engine_state_open (FpiDeviceGoodix55b4 *self)
 {
   g_autoptr(GError) error = NULL;
+  g_autofree gchar *path = g_build_filename (state_dir (), GOODIX55B4_STATE_FILE,
+                                             NULL);
 
-  g_free (self->state_path);
-  self->state_path = g_build_filename (state_dir (), GOODIX55B4_STATE_FILE, NULL);
-  if (goodix55b4_state_load (self->engine, self->state_path,
-                             GOODIX55B4_SENSOR_SUBTYPE, &error))
+  g_clear_pointer (&self->saver, goodix55b4_state_saver_free);
+  self->saver = goodix55b4_state_saver_new (path, GOODIX55B4_SENSOR_SUBTYPE);
+  if (goodix55b4_state_load (self->engine, path, GOODIX55B4_SENSOR_SUBTYPE,
+                             &error))
     {
       fp_dbg ("restored engine state (%u calibration samples)",
               self->engine->state.sample_count);
+      /* Already on disk: not rewritten until it changes. */
+      goodix55b4_state_saver_mark_saved (self->saver, self->engine);
       goodix55b4_state_new_generation (self->engine);
       return;
     }
@@ -510,27 +567,63 @@ engine_state_open (FpiDeviceGoodix55b4 *self)
   goodix55b4_state_init (self->engine);
 }
 
+/* Queued: written by the saver's thread, never on the main loop. */
 static void
 engine_state_save (FpiDeviceGoodix55b4 *self)
 {
-  g_autoptr(GError) error = NULL;
-
-  if (self->state_path &&
-      !goodix55b4_state_save (self->engine, self->state_path,
-                              GOODIX55B4_SENSOR_SUBTYPE, &error))
-    fp_warn ("cannot save engine state: %s", error->message);
+  if (self->saver)
+    goodix55b4_state_saver_queue (self->saver, self->engine);
 }
 
-static gboolean
-study_enabled (void)
+/* Unusable prints leave NULL entries in the per-gallery arrays. */
+static void
+bytes_unref_nullable (gpointer bytes)
 {
-  return g_strcmp0 (g_getenv ("GOODIX55B4_NO_STUDY"), "1") != 0;
+  if (bytes)
+    g_bytes_unref (bytes);
 }
 
 static gchar *
 study_dir (void)
 {
   return g_build_filename (state_dir (), GOODIX55B4_STUDY_SUBDIR, NULL);
+}
+
+static void
+study_open (FpiDeviceGoodix55b4 *self)
+{
+  g_autofree gchar *dir = study_dir ();
+
+  self->study_policy = goodix55b4_study_policy_from_env ();
+  fp_dbg ("study policy: %s", goodix55b4_study_policy_name (self->study_policy));
+  g_clear_pointer (&self->study_writer, goodix55b4_writer_free);
+  self->study_writer = goodix55b4_study_writer_new (dir);
+  g_clear_pointer (&self->studied, g_hash_table_unref);
+  self->studied = g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
+                                         (GDestroyNotify) g_bytes_unref);
+}
+
+/* The studied template for key: the latest one of this open (possibly
+ * still being written), else the stored one, else NULL. */
+static GBytes *
+study_lookup (FpiDeviceGoodix55b4 *self, const char *key)
+{
+  g_autoptr(GError) error = NULL;
+  g_autofree gchar *dir = NULL;
+  GBytes *studied;
+
+  if ((studied = g_hash_table_lookup (self->studied, key)))
+    return g_bytes_ref (studied);
+  dir = study_dir ();
+  studied = goodix55b4_study_load (dir, key, &error);
+  if (!studied)
+    {
+      if (!g_error_matches (error, G_FILE_ERROR, G_FILE_ERROR_NOENT))
+        fp_warn ("ignoring studied template: %s", error->message);
+      return NULL;
+    }
+  g_hash_table_insert (self->studied, g_strdup (key), g_bytes_ref (studied));
+  return studied;
 }
 
 static void activate_complete (FpiSsm  *ssm,
@@ -602,6 +695,7 @@ activate_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
       if (self->usb_reset_tried)
         fp_warn ("activation succeeded after USB reset");
       engine_state_open (self);
+      study_open (self);
     }
   fpi_device_open_complete (dev, error);
 }
@@ -618,6 +712,7 @@ dev_open (FpDevice *dev)
       return;
     }
   self->clear_tries = 0;
+  self->bad_images = 0;
   self->usb_reset_tried = FALSE;
   fpi_ssm_start (fpi_ssm_new (dev, activate_run_state, ACT_NUM_STATES),
                  activate_complete);
@@ -639,6 +734,21 @@ enum scan_states {
 static void scan_up_cb (FpDevice *dev, guint8 *data, guint16 len,
                         gpointer ssm, GError *error);
 
+static void up_watchdog_cb (FpDevice *dev,
+                            gpointer  user_data);
+
+static void
+arm_up_watchdog (FpiDeviceGoodix55b4 *self)
+{
+  g_clear_pointer (&self->up_watchdog, g_source_destroy);
+  self->up_watchdog = fpi_device_add_timeout (FP_DEVICE (self),
+                                              GOODIX55B4_FDT_UP_WATCHDOG_MS,
+                                              up_watchdog_cb, NULL, NULL);
+  /* count from now, not from the main loop's cached time */
+  g_source_set_ready_time (self->up_watchdog, g_get_monotonic_time () +
+                           GOODIX55B4_FDT_UP_WATCHDOG_MS * G_GINT64_CONSTANT (1000));
+}
+
 static void
 up_watchdog_cb (FpDevice *dev, gpointer user_data)
 {
@@ -650,17 +760,31 @@ up_watchdog_cb (FpDevice *dev, gpointer user_data)
   if (!self->scan_ssm || fpi_ssm_get_cur_state (self->scan_ssm) != SCAN_WAIT_UP)
     return;
 
+  /* Was armed once per wait: had the forced re-arm below gone unanswered
+   * too, the scan would have waited forever. */
+  if (self->up_forced)
+    {
+      fp_warn ("No reply to the forced finger-up either; giving up");
+      goodix_abort_command (dev);
+      fpi_ssm_mark_failed (self->scan_ssm, fpi_device_error_new_msg (
+                             FP_DEVICE_ERROR_PROTO,
+                             "Finger-up detection is not responding"));
+      return;
+    }
+  self->up_forced = TRUE;
+
   /* Safety net: no lift event although the finger should be long gone.
    * Re-arm finger-up with all thresholds at the "untouched" level, which the
    * MCU reports at once; Windows also re-sends 0x34 while one is armed. If a
    * finger is in fact still resting, its values become the DOWN table and
    * the lift shows up later as IRQ 0x0080 (baseline refresh). */
   fp_warn ("No finger-up event in %d ms, forcing it", GOODIX55B4_FDT_UP_WATCHDOG_MS);
-  goodix_reset_state (dev);
+  goodix_abort_command (dev);
   memset (self->fdt_up, self->calib.fdt_delta - 2, sizeof (self->fdt_up));
   payload = fdt_payload (GOODIX55B4_FDT_OP_UP, self->fdt_up, &len);
   goodix_send_mcu_switch_to_fdt_up (dev, payload, len, g_free, scan_up_cb,
                                     self->scan_ssm);
+  arm_up_watchdog (self);
 }
 
 static void
@@ -671,6 +795,7 @@ scan_up_cb (FpDevice *dev, guint8 *data, guint16 len, gpointer ssm,
   FdtReading r;
 
   g_clear_pointer (&self->up_watchdog, g_source_destroy);
+  self->up_forced = FALSE; /* the device answered */
   if (error)
     {
       fpi_ssm_mark_failed (ssm, error);
@@ -760,6 +885,8 @@ scan_image_cb (FpDevice *dev, guint8 *data, guint16 len, gpointer ssm,
       fpi_ssm_mark_failed (ssm, error);
       return;
     }
+  if (!image_crc_ok (self, ssm, data, len, SCAN_IMAGE, "finger"))
+    return;
   g_clear_pointer (&self->frame, g_free);
   self->frame = g_new (guint16, GOODIX55B4_PIXELS);
   if (!decode_frame (data, len, self->frame))
@@ -823,13 +950,7 @@ scan_run_state (FpiSsm *ssm, FpDevice *dev)
       payload = fdt_payload (GOODIX55B4_FDT_OP_UP, self->fdt_up, &len);
       goodix_send_mcu_switch_to_fdt_up (dev, payload, len, g_free, scan_up_cb,
                                         ssm);
-      g_clear_pointer (&self->up_watchdog, g_source_destroy);
-      self->up_watchdog = fpi_device_add_timeout (dev,
-                                                  GOODIX55B4_FDT_UP_WATCHDOG_MS,
-                                                  up_watchdog_cb, NULL, NULL);
-      /* count from now, not from the main loop's cached time */
-      g_source_set_ready_time (self->up_watchdog, g_get_monotonic_time () +
-                               GOODIX55B4_FDT_UP_WATCHDOG_MS * G_GINT64_CONSTANT (1000));
+      arm_up_watchdog (self);
       break;
 
     case SCAN_WAIT_DOWN:
@@ -861,6 +982,8 @@ scan_start (FpDevice *dev, FpiSsmCompletedCallback done)
 
   g_assert (self->scan_ssm == NULL);
   self->rearms = 0;
+  self->up_forced = FALSE;
+  self->bad_images = 0;
   self->scan_ssm = fpi_ssm_new (dev, scan_run_state, SCAN_NUM_STATES);
   fpi_ssm_start (self->scan_ssm, done);
 }
@@ -946,22 +1069,7 @@ engine_task_done (GObject *source, GAsyncResult *res, gpointer user_data)
 
   if (out && out->action_epoch == self->epoch)
     {
-      /* Carry the engine state forward exactly as upstream device/enroll.c. */
-      if (out->preprocess_state_valid &&
-          out->status != GOODIX_MILAN_RUNTIME_CANCELLED)
-        {
-          self->engine->state = out->preprocess_state;
-          self->engine->profile = out->profile_state;
-        }
-      else if (out->setup_state_valid)
-        {
-          self->engine->profile.setup_initialized =
-            out->profile_state.setup_initialized;
-          self->engine->profile.setup_refresh_pending =
-            out->profile_state.setup_refresh_pending;
-          self->engine->profile.setup_not_ready =
-            out->profile_state.setup_not_ready;
-        }
+      goodix55b4_state_apply_output (self->engine, out);
       engine_state_save (self);
       fp_dbg ("engine: status %d score %d winner %d quality %d coverage %d%s%s",
               out->status, out->score,
@@ -1037,13 +1145,13 @@ enroll_finish (FpDevice *dev, GError *error)
 
   if (error)
     {
-      g_clear_pointer (&self->enroll_tx, goodix_milan_enrollment_transaction_free);
+      goodix55b4_enroll_clear (&self->enroll);
       fpi_device_enroll_complete (dev, NULL, error);
       return;
     }
 
-  tpl = goodix_milan_enrollment_transaction_publish (self->enroll_tx);
-  g_clear_pointer (&self->enroll_tx, goodix_milan_enrollment_transaction_free);
+  tpl = goodix55b4_enroll_publish (&self->enroll);
+  goodix55b4_enroll_clear (&self->enroll);
   data = tpl ? goodix_milan_print_build_data (tpl, &error) : NULL;
   if (!data)
     {
@@ -1065,9 +1173,7 @@ enroll_engine_done (FpDevice *dev, GoodixMilanRuntimeOutput *out, GError *error)
 {
   FpiDeviceGoodix55b4 *self = FPI_DEVICE_GOODIX55B4 (dev);
   guint stages = FP_DEVICE_GET_CLASS (dev)->nr_enroll_stages;
-  GoodixMilanEnrollmentResult result;
-  GoodixMilanEnrollmentAttemptStatus st;
-  gboolean admitted;
+  Goodix55b4EnrollStep step;
   guint done;
 
   if (error)
@@ -1083,15 +1189,9 @@ enroll_engine_done (FpDevice *dev, GoodixMilanRuntimeOutput *out, GError *error)
       return;
     }
 
-  admitted = goodix_milan_runtime_enrollment_admitted (out);
-  /* As upstream device/enroll.c: an admitted sample that fails the
-   * enrollment gate breaks an unsaturated rollback streak. */
-  if (out->enrollment_sample_admitted && !admitted &&
-      self->enroll_bad_continue < 3)
-    self->enroll_bad_continue = 0;
-
-  done = goodix_milan_enrollment_transaction_count (self->enroll_tx);
-  if (!admitted)
+  step = goodix55b4_enroll_step (&self->enroll, out);
+  done = goodix55b4_enroll_count (&self->enroll);
+  if (step == GOODIX55B4_ENROLL_REJECTED)
     {
       fp_dbg ("enroll sample rejected (quality %d, coverage %d)",
               out->quality, out->coverage);
@@ -1100,15 +1200,9 @@ enroll_engine_done (FpDevice *dev, GoodixMilanRuntimeOutput *out, GError *error)
       scan_start (dev, enroll_scan_done);
       return;
     }
-
-  memset (&result, 0, sizeof (result));
-  st = goodix_milan_enrollment_transaction_attempt (
-    &self->enroll_tx, out->probe_template, &self->enroll_bad_records,
-    &self->enroll_bad_continue, &result);
   goodix_milan_runtime_output_free (out);
-  done = goodix_milan_enrollment_transaction_count (self->enroll_tx);
 
-  if (st == GOODIX_MILAN_ENROLLMENT_ACCEPTED)
+  if (step == GOODIX55B4_ENROLL_ACCEPTED)
     {
       fpi_device_enroll_progress (dev, done, NULL, NULL);
       if (done >= stages)
@@ -1120,7 +1214,7 @@ enroll_engine_done (FpDevice *dev, GoodixMilanRuntimeOutput *out, GError *error)
   else
     {
       fpi_device_enroll_progress (dev, done, NULL, fpi_device_retry_new (
-                                    st == GOODIX_MILAN_ENROLLMENT_RETRY_CENTER ?
+                                    step == GOODIX55B4_ENROLL_RETRY_CENTER ?
                                     FP_DEVICE_RETRY_CENTER_FINGER :
                                     FP_DEVICE_RETRY_REMOVE_FINGER));
     }
@@ -1144,10 +1238,7 @@ dev_enroll (FpDevice *dev)
 {
   FpiDeviceGoodix55b4 *self = FPI_DEVICE_GOODIX55B4 (dev);
 
-  g_clear_pointer (&self->enroll_tx, goodix_milan_enrollment_transaction_free);
-  self->enroll_tx = goodix_milan_enrollment_transaction_new ();
-  self->enroll_bad_records = 0;
-  self->enroll_bad_continue = 0;
+  goodix55b4_enroll_start (&self->enroll);
   scan_start (dev, enroll_scan_done);
 }
 
@@ -1172,27 +1263,40 @@ print_template (FpPrint *print)
 
 /* Keep the winner template with this probe studied into it, so the print
  * follows the finger over time (e.g. damp skin after washing). Stock
- * fprintd cannot store an updated print, hence the driver-side store. */
+ * fprintd cannot store an updated print, hence the driver-side store.
+ * Was written on the main loop (up to ~0.5 MB with fsync) after every
+ * match; now queued, and only when the policy keeps a changed template. */
 static void
-study_store (const GoodixMilanRuntimeOutput *out, GPtrArray *keys)
+study_store (FpiDeviceGoodix55b4 *self, const GoodixMilanRuntimeOutput *out,
+             GPtrArray *keys, GPtrArray *templates)
 {
-  g_autoptr(GError) error = NULL;
-  g_autofree gchar *dir = NULL;
   const char *key;
+  GBytes *matched;
 
   if (out->learning_error)
     fp_dbg ("study: %s", out->learning_error->message);
-  if (!out->final_candidate || !keys || out->winner_index >= keys->len)
+  if (!self->study_writer || !keys || !templates ||
+      out->winner_index >= keys->len || out->winner_index >= templates->len)
     return;
   key = g_ptr_array_index (keys, out->winner_index);
+  matched = g_ptr_array_index (templates, out->winner_index);
   if (!key)
     return;
-  dir = study_dir ();
-  if (!goodix55b4_study_save (dir, key, out->final_candidate, &error))
-    fp_warn ("cannot save studied template: %s", error->message);
-  else
-    fp_dbg ("study: action %d, template now %u features",
-            (int) out->study_action, out->final_candidate_info.feature_count);
+  if (!goodix55b4_study_should_store (self->study_policy, out, matched))
+    {
+      fp_dbg ("study: action %d, score %d: not kept (%s policy)",
+              (int) out->study_action, out->score,
+              goodix55b4_study_policy_name (self->study_policy));
+      return;
+    }
+  g_hash_table_insert (self->studied, g_strdup (key),
+                       g_bytes_ref (out->final_candidate));
+  goodix55b4_writer_queue (self->study_writer, key,
+                           g_bytes_ref (out->final_candidate),
+                           (GDestroyNotify) g_bytes_unref);
+  fp_dbg ("study: action %d, score %d, template now %u features",
+          (int) out->study_action, out->score,
+          out->final_candidate_info.feature_count);
 }
 
 static void
@@ -1203,6 +1307,7 @@ match_engine_done (FpDevice *dev, GoodixMilanRuntimeOutput *out, GError *error)
                       FPI_DEVICE_ACTION_IDENTIFY;
   g_autoptr(GPtrArray) prints = g_steal_pointer (&self->gallery_prints);
   g_autoptr(GPtrArray) keys = g_steal_pointer (&self->gallery_keys);
+  g_autoptr(GPtrArray) templates = g_steal_pointer (&self->gallery_templates);
 
   if (!error && out->status == GOODIX_MILAN_RUNTIME_CANCELLED)
     error = cancelled_error ();
@@ -1218,7 +1323,7 @@ match_engine_done (FpDevice *dev, GoodixMilanRuntimeOutput *out, GError *error)
     }
 
   if (out->status == GOODIX_MILAN_RUNTIME_MATCH)
-    study_store (out, keys);
+    study_store (self, out, keys, templates);
 
   if (out->status == GOODIX_MILAN_RUNTIME_RETRY)
     {
@@ -1260,6 +1365,7 @@ match_scan_done (FpiSsm *ssm, FpDevice *dev, GError *error)
     {
       g_clear_pointer (&self->gallery_prints, g_ptr_array_unref);
       g_clear_pointer (&self->gallery_keys, g_ptr_array_unref);
+      g_clear_pointer (&self->gallery_templates, g_ptr_array_unref);
       fpi_device_action_error (dev, error);
       return;
     }
@@ -1268,24 +1374,23 @@ match_scan_done (FpiSsm *ssm, FpDevice *dev, GError *error)
     (GDestroyNotify) goodix_milan_runtime_gallery_input_free);
   g_clear_pointer (&self->gallery_keys, g_ptr_array_unref);
   self->gallery_keys = g_ptr_array_new_with_free_func (g_free);
+  g_clear_pointer (&self->gallery_templates, g_ptr_array_unref);
+  self->gallery_templates = g_ptr_array_new_with_free_func (bytes_unref_nullable);
   for (guint i = 0; i < self->gallery_prints->len; i++)
     {
       g_autoptr(GBytes) tpl = print_template (g_ptr_array_index (self->gallery_prints, i));
       g_autoptr(GBytes) studied = NULL;
       gchar *key = NULL;
 
-      if (tpl && study_enabled ())
+      if (tpl && self->study_policy != GOODIX55B4_STUDY_OFF)
         {
-          g_autoptr(GError) study_error = NULL;
-          g_autofree gchar *dir = study_dir ();
-
           key = goodix55b4_study_key (tpl);
-          studied = goodix55b4_study_load (dir, key, &study_error);
-          if (!studied && !g_error_matches (study_error, G_FILE_ERROR,
-                                            G_FILE_ERROR_NOENT))
-            fp_warn ("ignoring studied template: %s", study_error->message);
+          studied = study_lookup (self, key);
         }
       g_ptr_array_add (self->gallery_keys, key);
+      g_ptr_array_add (self->gallery_templates,
+                       studied ? g_bytes_ref (studied) :
+                       tpl ? g_bytes_ref (tpl) : NULL);
 
       /* Index i keeps the winner index aligned with gallery_prints; an
        * unusable print simply never matches. */
@@ -1297,6 +1402,7 @@ match_scan_done (FpiSsm *ssm, FpDevice *dev, GError *error)
     {
       g_clear_pointer (&self->gallery_prints, g_ptr_array_unref);
       g_clear_pointer (&self->gallery_keys, g_ptr_array_unref);
+      g_clear_pointer (&self->gallery_templates, g_ptr_array_unref);
       if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_IDENTIFY)
         {
           /* Empty gallery (or only foreign prints): nothing can match. */
@@ -1385,7 +1491,7 @@ close_run_state (FpiSsm *ssm, FpDevice *dev)
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case CLOSE_SLEEP:
-      goodix_reset_state (dev);
+      goodix_abort_command (dev);
       /* the helper's "sleep_time" byte is the first payload byte: 01 00 */
       goodix_send_mcu_switch_to_sleep_mode (dev, 0x01, close_next, ssm);
       break;
@@ -1404,12 +1510,19 @@ close_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
   GError *deinit_error = NULL;
 
   g_clear_error (&error);
+  /* Waits for a write in progress (milliseconds), so fprintd exiting after
+   * close never loses the last state. */
+  g_clear_pointer (&self->saver, goodix55b4_state_saver_free);
   g_clear_pointer (&self->up_watchdog, g_source_destroy);
   g_clear_pointer (&self->setup, g_free);
   g_clear_pointer (&self->frame, g_free);
-  g_clear_pointer (&self->enroll_tx, goodix_milan_enrollment_transaction_free);
+  goodix55b4_enroll_clear (&self->enroll);
   g_clear_pointer (&self->gallery_prints, g_ptr_array_unref);
   g_clear_pointer (&self->gallery_keys, g_ptr_array_unref);
+  g_clear_pointer (&self->gallery_templates, g_ptr_array_unref);
+  /* Waits for queued studied templates, as for the engine state. */
+  g_clear_pointer (&self->study_writer, goodix55b4_writer_free);
+  g_clear_pointer (&self->studied, g_hash_table_unref);
   goodix_dev_deinit (dev, &deinit_error);
   fpi_device_close_complete (dev, deinit_error);
 }
@@ -1432,7 +1545,7 @@ dev_cancel (FpDevice *dev)
   /* Drop the pending FDT wait (its reply will be ignored) and fail the scan;
    * the scan's completion reports the cancellation to libfprint. */
   g_clear_pointer (&self->up_watchdog, g_source_destroy);
-  goodix_reset_state (dev);
+  goodix_abort_command (dev);
   if (self->scan_ssm)
     fpi_ssm_mark_failed (self->scan_ssm,
                          g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED,
@@ -1455,11 +1568,14 @@ dev_finalize (GObject *object)
 
   g_clear_pointer (&self->setup, g_free);
   g_clear_pointer (&self->frame, g_free);
-  g_clear_pointer (&self->state_path, g_free);
+  g_clear_pointer (&self->saver, goodix55b4_state_saver_free);
   g_clear_pointer (&self->engine, g_free);
-  g_clear_pointer (&self->enroll_tx, goodix_milan_enrollment_transaction_free);
+  goodix55b4_enroll_clear (&self->enroll);
   g_clear_pointer (&self->gallery_prints, g_ptr_array_unref);
   g_clear_pointer (&self->gallery_keys, g_ptr_array_unref);
+  g_clear_pointer (&self->gallery_templates, g_ptr_array_unref);
+  g_clear_pointer (&self->study_writer, goodix55b4_writer_free);
+  g_clear_pointer (&self->studied, g_hash_table_unref);
   G_OBJECT_CLASS (fpi_device_goodix55b4_parent_class)->finalize (object);
 }
 

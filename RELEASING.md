@@ -28,9 +28,9 @@ package builds from the GitHub tag, so GitHub must be done first.
 - Ask the maintainer before pushing, tagging, merging PRs or publishing to
   the AUR. Each is public and hard to undo; agreeing to one is not agreeing
   to the others.
-- `git status` must be clean apart from known untracked local files (e.g.
-  `finger.pgm`, old `*.pkg.tar` in `packaging/arch/`). Never `git add -A`;
-  add files by name.
+- `git status` must be clean (local build output such as `finger.pgm` or
+  `packaging/arch/*.pkg.tar` is ignored). Never `git add -A`; add files by
+  name.
 - Be on `master`, up to date: `git pull --rebase origin master`.
 - Build locally once: `scripts/build-local.sh` (builds into `.build/`,
   installs nothing). It must finish without errors or new warnings.
@@ -108,13 +108,17 @@ package builds from the GitHub tag, so GitHub must be done first.
    cd ~/aur/libfprint-goodix55b4      # or: git clone ssh://aur@aur.archlinux.org/libfprint-goodix55b4.git
    git pull
    cp <repo>/packaging/arch/PKGBUILD .
+   updpkgsums                         # pins the driver source: fills in its SKIP
    makepkg --printsrcinfo > .SRCINFO
-   git diff                           # expect only pkgver/pkgrel (and source tag) changes, unless you meant more
+   git diff                           # expect pkgver/pkgrel and the driver checksum, unless you meant more
    git add PKGBUILD .SRCINFO
    git commit -m "1.94.10.m6-1: <one-line summary>"
    git push origin master
    ```
 
+   `updpkgsums` (from `pacman-contrib`) computes the checksum of the tagged
+   tree, so an AUR build fails if the tag ever points elsewhere. The repo's
+   PKGBUILD cannot carry it (it is part of that tree) and keeps `SKIP`.
    Always regenerate `.SRCINFO`; the AUR rejects a push where it does not
    match the PKGBUILD. Commit only `PKGBUILD` and `.SRCINFO`, never build
    output.
