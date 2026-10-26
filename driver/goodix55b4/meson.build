@@ -3,6 +3,7 @@ goodix55b4_sources = files(
     'goodix55b4-state.c',
     'goodix55b4-study.c',
     'goodix55b4-calib.c',
+    'goodix55b4-enroll.c',
     'goodix.c',
     'goodix_proto.c',
     'goodixtls.c',

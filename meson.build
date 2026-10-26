@@ -41,14 +41,21 @@ driver = static_library('goodix55b4',
 test_env = environment()
 test_env.set('ASAN_OPTIONS', 'detect_leaks=1:abort_on_error=1')
 test_env.set('UBSAN_OPTIONS', 'print_stacktrace=1:halt_on_error=1')
+# Real frames are personal data and stay outside the repository.
+dataset = get_option('dataset')
+if dataset != ''
+  test_env.set('GOODIX55B4_DATASET', dataset)
+endif
 
 foreach t : ['goodixtls', 'goodix-proto', 'goodix55b4-calib',
-             'goodix55b4-state', 'goodix55b4-study']
+             'goodix55b4-state', 'goodix55b4-study', 'goodix55b4-dataset']
   exe = executable('test-' + t, 'tests/test-' + t + '.c',
     c_args: goodix55b4_cflags + lf_inc + ['-Werror'],
     link_with: driver,
     dependencies: deps,
     build_rpath: lf_build / 'libfprint',
   )
-  test(t, exe, env: test_env, protocol: 'tap')
+  # The dataset suite runs the engine on real frames: slow under ASan.
+  test(t, exe, env: test_env, protocol: 'tap',
+       timeout: t == 'goodix55b4-dataset' ? 1800 : 30)
 endforeach

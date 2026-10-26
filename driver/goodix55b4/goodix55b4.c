@@ -20,6 +20,7 @@
 #include "goodix_proto.h"
 #include "goodix55b4.h"
 #include "goodix55b4-calib.h"
+#include "goodix55b4-enroll.h"
 #include "goodix55b4-state.h"
 #include "goodix55b4-study.h"
 #include "milan/match/match.h"
@@ -61,9 +62,7 @@ struct _FpiDeviceGoodix55b4
   gchar                *state_path;
   guint64               epoch;
   GTask                *engine_task;
-  GoodixMilanEnrollmentTransaction *enroll_tx;
-  guint                 enroll_bad_records;
-  guint                 enroll_bad_continue;
+  Goodix55b4Enroll      enroll;
   GPtrArray            *gallery_prints; /* FpPrint per gallery index (identify) */
   GPtrArray            *gallery_keys;   /* study key per gallery index, or NULL */
 };
@@ -946,22 +945,7 @@ engine_task_done (GObject *source, GAsyncResult *res, gpointer user_data)
 
   if (out && out->action_epoch == self->epoch)
     {
-      /* Carry the engine state forward exactly as upstream device/enroll.c. */
-      if (out->preprocess_state_valid &&
-          out->status != GOODIX_MILAN_RUNTIME_CANCELLED)
-        {
-          self->engine->state = out->preprocess_state;
-          self->engine->profile = out->profile_state;
-        }
-      else if (out->setup_state_valid)
-        {
-          self->engine->profile.setup_initialized =
-            out->profile_state.setup_initialized;
-          self->engine->profile.setup_refresh_pending =
-            out->profile_state.setup_refresh_pending;
-          self->engine->profile.setup_not_ready =
-            out->profile_state.setup_not_ready;
-        }
+      goodix55b4_state_apply_output (self->engine, out);
       engine_state_save (self);
       fp_dbg ("engine: status %d score %d winner %d quality %d coverage %d%s%s",
               out->status, out->score,
@@ -1037,13 +1021,13 @@ enroll_finish (FpDevice *dev, GError *error)
 
   if (error)
     {
-      g_clear_pointer (&self->enroll_tx, goodix_milan_enrollment_transaction_free);
+      goodix55b4_enroll_clear (&self->enroll);
       fpi_device_enroll_complete (dev, NULL, error);
       return;
     }
 
-  tpl = goodix_milan_enrollment_transaction_publish (self->enroll_tx);
-  g_clear_pointer (&self->enroll_tx, goodix_milan_enrollment_transaction_free);
+  tpl = goodix55b4_enroll_publish (&self->enroll);
+  goodix55b4_enroll_clear (&self->enroll);
   data = tpl ? goodix_milan_print_build_data (tpl, &error) : NULL;
   if (!data)
     {
@@ -1065,9 +1049,7 @@ enroll_engine_done (FpDevice *dev, GoodixMilanRuntimeOutput *out, GError *error)
 {
   FpiDeviceGoodix55b4 *self = FPI_DEVICE_GOODIX55B4 (dev);
   guint stages = FP_DEVICE_GET_CLASS (dev)->nr_enroll_stages;
-  GoodixMilanEnrollmentResult result;
-  GoodixMilanEnrollmentAttemptStatus st;
-  gboolean admitted;
+  Goodix55b4EnrollStep step;
   guint done;
 
   if (error)
@@ -1083,15 +1065,9 @@ enroll_engine_done (FpDevice *dev, GoodixMilanRuntimeOutput *out, GError *error)
       return;
     }
 
-  admitted = goodix_milan_runtime_enrollment_admitted (out);
-  /* As upstream device/enroll.c: an admitted sample that fails the
-   * enrollment gate breaks an unsaturated rollback streak. */
-  if (out->enrollment_sample_admitted && !admitted &&
-      self->enroll_bad_continue < 3)
-    self->enroll_bad_continue = 0;
-
-  done = goodix_milan_enrollment_transaction_count (self->enroll_tx);
-  if (!admitted)
+  step = goodix55b4_enroll_step (&self->enroll, out);
+  done = goodix55b4_enroll_count (&self->enroll);
+  if (step == GOODIX55B4_ENROLL_REJECTED)
     {
       fp_dbg ("enroll sample rejected (quality %d, coverage %d)",
               out->quality, out->coverage);
@@ -1100,15 +1076,9 @@ enroll_engine_done (FpDevice *dev, GoodixMilanRuntimeOutput *out, GError *error)
       scan_start (dev, enroll_scan_done);
       return;
     }
-
-  memset (&result, 0, sizeof (result));
-  st = goodix_milan_enrollment_transaction_attempt (
-    &self->enroll_tx, out->probe_template, &self->enroll_bad_records,
-    &self->enroll_bad_continue, &result);
   goodix_milan_runtime_output_free (out);
-  done = goodix_milan_enrollment_transaction_count (self->enroll_tx);
 
-  if (st == GOODIX_MILAN_ENROLLMENT_ACCEPTED)
+  if (step == GOODIX55B4_ENROLL_ACCEPTED)
     {
       fpi_device_enroll_progress (dev, done, NULL, NULL);
       if (done >= stages)
@@ -1120,7 +1090,7 @@ enroll_engine_done (FpDevice *dev, GoodixMilanRuntimeOutput *out, GError *error)
   else
     {
       fpi_device_enroll_progress (dev, done, NULL, fpi_device_retry_new (
-                                    st == GOODIX_MILAN_ENROLLMENT_RETRY_CENTER ?
+                                    step == GOODIX55B4_ENROLL_RETRY_CENTER ?
                                     FP_DEVICE_RETRY_CENTER_FINGER :
                                     FP_DEVICE_RETRY_REMOVE_FINGER));
     }
@@ -1144,10 +1114,7 @@ dev_enroll (FpDevice *dev)
 {
   FpiDeviceGoodix55b4 *self = FPI_DEVICE_GOODIX55B4 (dev);
 
-  g_clear_pointer (&self->enroll_tx, goodix_milan_enrollment_transaction_free);
-  self->enroll_tx = goodix_milan_enrollment_transaction_new ();
-  self->enroll_bad_records = 0;
-  self->enroll_bad_continue = 0;
+  goodix55b4_enroll_start (&self->enroll);
   scan_start (dev, enroll_scan_done);
 }
 
@@ -1407,7 +1374,7 @@ close_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
   g_clear_pointer (&self->up_watchdog, g_source_destroy);
   g_clear_pointer (&self->setup, g_free);
   g_clear_pointer (&self->frame, g_free);
-  g_clear_pointer (&self->enroll_tx, goodix_milan_enrollment_transaction_free);
+  goodix55b4_enroll_clear (&self->enroll);
   g_clear_pointer (&self->gallery_prints, g_ptr_array_unref);
   g_clear_pointer (&self->gallery_keys, g_ptr_array_unref);
   goodix_dev_deinit (dev, &deinit_error);
@@ -1457,7 +1424,7 @@ dev_finalize (GObject *object)
   g_clear_pointer (&self->frame, g_free);
   g_clear_pointer (&self->state_path, g_free);
   g_clear_pointer (&self->engine, g_free);
-  g_clear_pointer (&self->enroll_tx, goodix_milan_enrollment_transaction_free);
+  goodix55b4_enroll_clear (&self->enroll);
   g_clear_pointer (&self->gallery_prints, g_ptr_array_unref);
   g_clear_pointer (&self->gallery_keys, g_ptr_array_unref);
   G_OBJECT_CLASS (fpi_device_goodix55b4_parent_class)->finalize (object);

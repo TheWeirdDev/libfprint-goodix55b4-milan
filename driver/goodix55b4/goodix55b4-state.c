@@ -98,6 +98,25 @@ goodix55b4_state_new_generation (Goodix55b4EngineState *s)
   s->profile.setup_not_ready = 0;
 }
 
+void
+goodix55b4_state_apply_output (Goodix55b4EngineState          *s,
+                               const GoodixMilanRuntimeOutput *out)
+{
+  if (out->preprocess_state_valid &&
+      out->status != GOODIX_MILAN_RUNTIME_CANCELLED)
+    {
+      s->state = out->preprocess_state;
+      s->profile = out->profile_state;
+    }
+  else if (out->setup_state_valid)
+    {
+      s->profile.setup_initialized = out->profile_state.setup_initialized;
+      s->profile.setup_refresh_pending =
+        out->profile_state.setup_refresh_pending;
+      s->profile.setup_not_ready = out->profile_state.setup_not_ready;
+    }
+}
+
 static void
 digest (const Goodix55b4EngineState *s, guint8 out[32])
 {

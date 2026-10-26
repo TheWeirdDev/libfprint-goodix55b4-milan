@@ -6,6 +6,7 @@
 #   scripts/run-tests.sh                 # all tests
 #   scripts/run-tests.sh goodix-proto    # one suite (meson test name)
 #   LIBFPRINT_DIR=/path scripts/run-tests.sh
+#   GOODIX55B4_DATASET=~/55b4-set scripts/run-tests.sh   # + real-frame tests
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -22,5 +23,6 @@ if [[ ! -d $BUILD ]]; then
         -Db_sanitize=address,undefined -Db_lundef=false \
         -Dbuildtype=debug
 fi
+meson configure "$BUILD" -Ddataset="${GOODIX55B4_DATASET:-}"
 nice ninja -C "$BUILD"
 meson test -C "$BUILD" --print-errorlogs "$@"
