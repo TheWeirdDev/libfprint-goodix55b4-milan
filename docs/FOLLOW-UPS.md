@@ -21,20 +21,6 @@ Check that this does not cancel the copy `release.yml` calls via
 `workflow_call` (a called workflow shares the caller's context; give it a
 distinct group, e.g. include `github.workflow`).
 
-### Document the flaky upstream test in RELEASING.md
-The first release run of v1.94.100.m3 failed in the Arch job's `check()`:
-upstream libfprint's `egis_etu905` umockdev replay stalled on the runner
-("Replay may be stuck", then "transfer timed out"), and libfprint's tests
-run with `G_DEBUG=fatal-warnings`, so the warning aborted the test. Our
-driver is not involved; the release job is gated, so nothing was published.
-Re-running only the failed job on the same tag passed:
-
-    gh run rerun <run-id> -R TheWeirdDev/libfprint-goodix55b4-milan --failed
-
-Add this to step 5 of `RELEASING.md`: if the only failure is an upstream
-umockdev test of another driver, re-run the failed job; if it fails the
-same way twice, look at what changed in the `archlinux:base-devel` image.
-
 ### `goodix_decode_protocol` length 0
 `goodix_proto.c`: a protocol length field of 0 underflows to 65535; the
 bounds check right after rejects it (covered by

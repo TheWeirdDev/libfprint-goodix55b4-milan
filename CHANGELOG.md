@@ -3,6 +3,12 @@
 Versions are `<libfprint version>.m<n>`; each `v…` tag is built and published
 as a GitHub release with its section below as the release notes.
 
+## v1.94.100.m4 - 2026-10-27
+
+- Package builds no longer fail at random: libfprint's `egis_etu905` test (a
+  different driver's replay test, flaky on CI runners) is no longer run
+  while building the packages. The driver itself is unchanged.
+
 ## v1.94.100.m3 - 2026-10-26
 
 Reliability and security fixes from a full review of the driver. Prints,
