@@ -6,21 +6,6 @@ when it is done.
 
 ## Small
 
-### Cancel superseded test runs
-`.github/workflows/tests.yml` runs on every push. Two quick pushes to the
-same branch (e.g. a PR merge, then the release commit) run the tests twice;
-the older run is wasted. Add at the top level:
-
-```yaml
-concurrency:
-  group: tests-${{ github.ref }}
-  cancel-in-progress: true
-```
-
-Check that this does not cancel the copy `release.yml` calls via
-`workflow_call` (a called workflow shares the caller's context; give it a
-distinct group, e.g. include `github.workflow`).
-
 ### `goodix_decode_protocol` length 0
 `goodix_proto.c`: a protocol length field of 0 underflows to 65535; the
 bounds check right after rejects it (covered by

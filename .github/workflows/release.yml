@@ -27,11 +27,51 @@ env:
   REF: ${{ github.event_name == 'push' && github.ref_name || inputs.tag || github.ref }}
 
 jobs:
+  # A tag is pushed together with (or after) a commit that tests.yml already
+  # runs on, so a tag push waits for that run instead of running the tests a
+  # second time. A manual run has no such push run and runs them itself.
   tests:
+    if: github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/tests.yml
 
+  tests-gate:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Wait for the Tests run of this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          seen=0
+          while true; do
+            runs=$(gh run list -R "$GITHUB_REPOSITORY" --workflow tests.yml \
+              --event push --commit "$GITHUB_SHA" --json status,conclusion)
+            if [ "$(jq 'any(.[]; .conclusion == "success")' <<<"$runs")" = true ]; then
+              echo "Tests passed for $GITHUB_SHA"
+              exit 0
+            fi
+            if [ "$(jq 'any(.[]; .status != "completed")' <<<"$runs")" = false ]; then
+              seen=$((seen + 1))
+              # Nothing running: give a just-pushed commit a minute to start
+              # its run, then fail (no run, or only failed/cancelled ones).
+              if [ "$seen" -gt 6 ]; then
+                echo "::error::No passing Tests run for $GITHUB_SHA; push the commit to a branch or run the tests first"
+                exit 1
+              fi
+            else
+              seen=0
+            fi
+            sleep 10
+          done
+
   notes:
-    needs: tests
+    needs: [tests, tests-gate]
+    # Skipped is fine (only one of the two runs); a failed one is not.
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

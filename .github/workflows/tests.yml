@@ -10,6 +10,13 @@ on:
   pull_request:
   workflow_call:
 
+# A newer push to the same ref makes the older run pointless. The workflow
+# name is part of the group so the copy release.yml calls (github.workflow is
+# then the caller's) is not cancelled by, or cancelling, a push run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   tests:
     runs-on: ubuntu-latest
