@@ -112,6 +112,9 @@ jobs:
 
   arch:
     needs: notes
+    # The default success() check also skips this when tests or tests-gate
+    # (one of them always) was skipped; only a failure upstream should.
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     defaults:
@@ -153,6 +156,9 @@ jobs:
 
   deb:
     needs: notes
+    # The default success() check also skips this when tests or tests-gate
+    # (one of them always) was skipped; only a failure upstream should.
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -192,6 +198,9 @@ jobs:
 
   rpm:
     needs: notes
+    # The default success() check also skips this when tests or tests-gate
+    # (one of them always) was skipped; only a failure upstream should.
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -230,7 +239,8 @@ jobs:
 
   release:
     needs: [notes, arch, deb, rpm]
-    if: github.event_name == 'push' || inputs.tag != ''
+    # As for the builds; !failure() still stops it if any build failed.
+    if: ${{ !failure() && !cancelled() && (github.event_name == 'push' || inputs.tag != '') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
