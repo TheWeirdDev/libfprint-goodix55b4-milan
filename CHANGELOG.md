@@ -3,7 +3,7 @@
 Versions are `<libfprint version>.m<n>`; each `v…` tag is built and published
 as a GitHub release with its section below as the release notes.
 
-## Unreleased
+## v1.94.100.m5 - 2026-11-03
 
 - New package for Fedora 45.
 - Fedora: the package no longer pulls in ~25 development packages
