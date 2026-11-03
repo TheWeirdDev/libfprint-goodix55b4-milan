@@ -1,13 +1,16 @@
 # Upstream libfprint with all of its drivers plus goodix55b4 (Goodix
 # 27c6:55b4/5584, native Milan matcher). A drop-in replacement for Fedora's
-# libfprint and libfprint-devel; fprintd uses it directly.
+# libfprint (and, with the -devel subpackage, libfprint-devel); fprintd uses
+# it directly.
 #
 # Built by build-rpm.sh, which defines the versions (read from the Arch
 # PKGBUILD) and creates both source tarballs. The defaults below only keep
 # the spec parseable for `dnf builddep`.
 #
-# Built like Fedora's own libfprint.spec (drivers=all, same files), as one
-# package instead of libfprint + libfprint-devel, and with the tests run.
+# Built like Fedora's own libfprint.spec (drivers=all, same files and the
+# same libfprint / libfprint-devel split), with the tests run. The split
+# matters: rpm derives pkgconfig(...) requires from libfprint-2.pc, so a
+# package that ships the .pc pulls in glib2-devel, python3 and ~25 others.
 %{!?pkgver:     %global pkgver 0}
 %{!?lf_version: %global lf_version 0}
 %{!?lf_commit:  %global lf_commit 0}
@@ -47,16 +50,25 @@ BuildRequires:  umockdev
 
 Provides:       libfprint = %{lf_version}
 Provides:       libfprint%{?_isa} = %{lf_version}
-Provides:       libfprint-devel = %{lf_version}
-Provides:       libfprint-devel%{?_isa} = %{lf_version}
 Conflicts:      libfprint
-Conflicts:      libfprint-devel
 
 %description
 Drop-in replacement for libfprint: upstream libfprint %{lf_version} with all
 of its drivers plus goodix55b4, which uses the native Milan matcher. Also
-contains the development files and the GObject typelib, and the libfprint
-examples as goodix55b4-{img-capture,enroll,verify,identify,manage-prints}.
+contains the GObject typelib and the libfprint examples as
+goodix55b4-{img-capture,enroll,verify,identify,manage-prints}. The headers,
+pkg-config file and GIR data are in %{name}-devel.
+
+%package devel
+Summary:        Development files for %{name}
+Requires:       %{name}%{?_isa} = %{version}-%{release}
+Provides:       libfprint-devel = %{lf_version}
+Provides:       libfprint-devel%{?_isa} = %{lf_version}
+Conflicts:      libfprint-devel
+
+%description devel
+Headers, pkg-config file and GObject introspection data for building
+against %{name}. Replaces Fedora's libfprint-devel.
 
 %prep
 %setup -q -n libfprint -a 1
@@ -98,12 +110,14 @@ fi
 %license goodix55b4-milan/LICENSE
 %doc NEWS README.md
 %{_bindir}/goodix55b4-*
-%{_libdir}/libfprint-2.so
 %{_libdir}/libfprint-2.so.2*
 %{_libdir}/girepository-1.0/FPrint-2.0.typelib
-%{_libdir}/pkgconfig/libfprint-2.pc
-%{_includedir}/libfprint-2/
-%{_datadir}/gir-1.0/FPrint-2.0.gir
 %{_datadir}/metainfo/org.freedesktop.libfprint.metainfo.xml
 %{_udevrulesdir}/70-libfprint-2.rules
 %{_udevhwdbdir}/60-autosuspend-libfprint-2.hwdb
+
+%files devel
+%{_libdir}/libfprint-2.so
+%{_libdir}/pkgconfig/libfprint-2.pc
+%{_includedir}/libfprint-2/
+%{_datadir}/gir-1.0/FPrint-2.0.gir
