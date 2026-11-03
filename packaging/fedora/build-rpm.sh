@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build an .rpm of upstream libfprint with all of its drivers plus
 # goodix55b4, for the Fedora release this runs on, from
-# libfprint-goodix55b4.spec. A drop-in replacement for libfprint.
+# libfprint-goodix55b4.spec. A drop-in replacement for libfprint; also
+# builds libfprint-goodix55b4-devel (replaces libfprint-devel).
 #
 #   packaging/fedora/build-rpm.sh [OUTDIR]       # default: .build/rpm
 #

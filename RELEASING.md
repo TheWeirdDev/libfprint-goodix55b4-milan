@@ -78,12 +78,13 @@ package builds from the GitHub tag, so GitHub must be done first.
    ```
 
    The release must have the changelog section as its notes and these
-   eight files:
+   nine files:
 
    - `libfprint-goodix55b4-<pkgver>-1-x86_64.pkg.tar.zst` (Arch)
    - `libfprint-goodix55b4_<pkgver>-1_<release>_amd64.deb` for `debian12`,
      `debian13`, `ubuntu24.04` and `ubuntu26.04`
-   - `libfprint-goodix55b4-<pkgver>-1.fc<NN>.x86_64.rpm` for `fc43` and `fc44`
+   - `libfprint-goodix55b4-<pkgver>-1.fc<NN>.x86_64.rpm` for `fc43`, `fc44`
+     and `fc45` (the `-devel` rpm is built but not published)
    - `SHA256SUMS`
 
    The release job runs only when every build succeeded. If the run failed, read `gh run view <run-id> --log-failed`,

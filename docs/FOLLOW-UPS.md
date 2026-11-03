@@ -4,33 +4,12 @@ Open work left after the review and fixes released in v1.94.100.m3
 (PR #3). Each item says why it matters and where to start. Remove an item
 when it is done.
 
-## Small
-
-### `goodix_decode_protocol` length 0
-`goodix_proto.c`: a protocol length field of 0 underflows to 65535; the
-bounds check right after rejects it (covered by
-`/proto/decode-rejects-short`), but it is fragile. Reject `length == 0`
-explicitly before subtracting.
-
 ## Medium
 
-### Collapse the command wrappers in `goodix.c`
-About 25 `goodix_send_*` functions repeat the same block: allocate a
-`GoodixCallbackInfo` with `malloc`, fill it, call `goodix_send_protocol`
-with an adapter (`goodix_receive_default`, `_none`, `_success`, ...), or
-call it with `NULL, NULL` when there is no callback. One helper taking
-`(cmd, payload, length, free_func, checksum, timeout, reply, adapter,
-callback, user_data)` replaces ~600 lines and the `malloc`/`g_free` mix
-(the adapters free with `g_autofree`). `goodix_send_protocol` must keep its
-signature (contract documented above it: non-NULL callbacks are adapters
-that consume a `GoodixCallbackInfo`). Behaviour must not change: the unit
-tests do not cover these wrappers, so verify on the sensor (open, enroll,
-verify, close) with the sanitized build. Large diff; keep it in its own PR.
-
 ### Formatting of `goodix.c` and `goodixtls.c`
-Both files mix GNU style with K&R blocks inherited from goodixtls55x4.
-Cosmetic; do it after the wrapper refactor, in a separate commit, so the
-refactor diff stays readable.
+Both files mix GNU style with K&R blocks inherited from goodixtls55x4
+(`goodix_cmd.c` is already GNU style). Cosmetic; do it in a separate
+commit.
 
 ### Measure the study policies on damp skin
 `GOODIX55B4_STUDY_POLICY` (`native` default, `bounded`, `off`) was chosen

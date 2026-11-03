@@ -24,6 +24,9 @@
 // 1 seconds USB timeout
 #define GOODIX_TIMEOUT (1000)
 
+/* Bound on each wait for the device's TLS packs. */
+#define GOODIX_TLS_HANDSHAKE_TIMEOUT_MS (2000)
+
 G_DECLARE_DERIVABLE_TYPE (FpiDeviceGoodixTls, fpi_device_goodixtls, FPI,
                           DEVICE_GOODIXTLS, FpDevice)
 

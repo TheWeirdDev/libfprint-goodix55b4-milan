@@ -40,7 +40,7 @@ Ready-made packages are attached to every
 [GitHub release](https://github.com/TheWeirdDev/libfprint-goodix55b4-milan/releases/latest).
 Like the Arch package, each one replaces the distribution's libfprint
 (`libfprint-2-2`, `libfprint-2-dev`, `gir1.2-fprint-2.0` on Debian/Ubuntu;
-`libfprint`, `libfprint-devel` on Fedora). fprintd keeps working.
+`libfprint` on Fedora). fprintd keeps working.
 
 **1. Find the file for your release.** A package only works on the release
 it was built for, so pick the matching one (x86_64 only):
@@ -53,6 +53,7 @@ it was built for, so pick the matching one (x86_64 only):
 | Ubuntu 26.04 LTS | `_ubuntu26.04_amd64.deb` |
 | Fedora 43 | `.fc43.x86_64.rpm` |
 | Fedora 44 | `.fc44.x86_64.rpm` |
+| Fedora 45 | `.fc45.x86_64.rpm` |
 
 Other releases (e.g. Ubuntu 22.04, Linux Mint, Pop!_OS) are not built; on a
 derivative, use the file of the release it is based on at your own risk,
@@ -71,7 +72,7 @@ Debian/Ubuntu if it is missing):
                 *)      suffix="_${ID}${VERSION_ID}_amd64.deb" ;; esac
     base=https://github.com/TheWeirdDev/libfprint-goodix55b4-milan/releases/latest/download
     curl -fLO "$base/SHA256SUMS"
-    file=$(grep -o "libfprint-goodix55b4[^ ]*$suffix" SHA256SUMS) &&
+    file=$(grep -o "libfprint-goodix55b4[-_][0-9][^ ]*$suffix" SHA256SUMS) &&
         curl -fLO "$base/$file" && echo "downloaded $file"
 
 If it prints nothing after `SHA256SUMS`, there is no package for your
@@ -86,7 +87,7 @@ release.
     # Debian/Ubuntu
     sudo apt install ./libfprint-goodix55b4_*.deb
     # Fedora
-    sudo dnf install --allowerasing ./libfprint-goodix55b4-*.rpm
+    sudo dnf install --allowerasing ./libfprint-goodix55b4-[0-9]*.rpm
 
 apt lists `libfprint-2-2` under "will be REMOVED" and dnf replaces
 `libfprint`; that is expected. Then provision the sensor if needed (see
@@ -114,6 +115,11 @@ To build a package yourself, run the script on the release you build for
     sudo dnf install rpm-build git 'dnf-command(builddep)'
     sudo dnf builddep packaging/fedora/libfprint-goodix55b4.spec
     packaging/fedora/build-rpm.sh          # .rpm in .build/rpm
+
+On Fedora this also builds `libfprint-goodix55b4-devel` (headers and
+`libfprint-2.pc`, replacing `libfprint-devel`). It is not attached to the
+releases; install it only to build software against libfprint, as it pulls
+in `glib2-devel` and its dependencies.
 
 ## Notes for all packages
 

@@ -123,7 +123,12 @@ goodix_decode_protocol (guint8 *data, guint32 data_len, guint8 *cmd,
   if (data_len < sizeof (GoodixProtocol) + sizeof (guint8))
     return FALSE;
 
-  length = GUINT16_FROM_LE (protocol->length) - sizeof (guint8);
+  /* The length field counts the trailing checksum byte, so it is at least
+   * 1. Reject 0 here instead of letting the subtraction wrap to 0xffff. */
+  length = GUINT16_FROM_LE (protocol->length);
+  if (length == 0)
+    return FALSE;
+  length -= sizeof (guint8);
 
   if (data_len < length + sizeof (GoodixProtocol) + sizeof (guint8))
     return FALSE;

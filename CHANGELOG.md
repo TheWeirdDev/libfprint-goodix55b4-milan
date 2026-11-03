@@ -3,6 +3,21 @@
 Versions are `<libfprint version>.m<n>`; each `v…` tag is built and published
 as a GitHub release with its section below as the release notes.
 
+## Unreleased
+
+- New package for Fedora 45.
+- Fedora: the package no longer pulls in ~25 development packages
+  (`glib2-devel`, `python3`, ...). The headers and `libfprint-2.pc` moved to
+  a separate `libfprint-goodix55b4-devel` package, as in Fedora's own
+  libfprint. It is not attached to the release; `packaging/fedora/build-rpm.sh`
+  builds it for those who build software against libfprint.
+- Internal: the protocol command wrappers share one helper (in the new
+  `goodix_cmd.c`) and are covered by unit tests that pin every command's
+  bytes; a protocol length field of 0 is rejected explicitly. The commands
+  sent to the sensor are unchanged.
+- Fixed the unused preset-PSK write (0xe0) encoder, which sent 4
+  uninitialized bytes and dropped the end of the data.
+
 ## v1.94.100.m4 - 2026-10-27
 
 - Package builds no longer fail at random: libfprint's `egis_etu905` test (a

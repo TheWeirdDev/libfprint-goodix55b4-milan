@@ -126,6 +126,24 @@ test_decode_rejects_short (void)
   g_assert_null (payload);
 }
 
+static void
+test_decode_rejects_zero_length_large_buffer (void)
+{
+  /* Length field 0 with enough data behind it that a wrapped length of
+   * 0xfffe would pass the bounds check: must still be rejected. */
+  const gsize len = sizeof (GoodixProtocol) + 0x10000;
+  g_autofree guint8 *data = g_malloc0 (len);
+  g_autofree guint8 *payload = NULL;
+  guint16 payload_len = 0;
+  guint8 cmd = 0;
+  gboolean valid, valid_null;
+
+  data[0] = 0x20;
+  g_assert_false (goodix_decode_protocol (data, len, &cmd, &payload,
+                                          &payload_len, &valid, &valid_null));
+  g_assert_null (payload);
+}
+
 /* ---- pack reader ---- */
 
 static GBytes *
@@ -459,6 +477,8 @@ main (int argc, char **argv)
   g_test_add_func ("/proto/encode-null-checksum", test_encode_null_checksum);
   g_test_add_func ("/proto/protocol-roundtrip", test_protocol_roundtrip);
   g_test_add_func ("/proto/decode-rejects-short", test_decode_rejects_short);
+  g_test_add_func ("/proto/decode-rejects-zero-length",
+                   test_decode_rejects_zero_length_large_buffer);
   g_test_add_func ("/proto/reader/split", test_reader_split);
   g_test_add_func ("/proto/reader/two-packs-one-transfer",
                    test_reader_two_packs_one_transfer);
