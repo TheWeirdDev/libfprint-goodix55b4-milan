@@ -151,6 +151,12 @@ typedef struct __attribute__((__packed__)) _GoodixPresetPsk {
   guint32 offset;
 } GoodixPresetPsk;
 
+/* Header of 0xe0 (preset PSK write); the data follows. */
+typedef struct __attribute__((__packed__)) _GoodixPresetPskWrite {
+  guint32 flags;
+  guint32 length;
+} GoodixPresetPskWrite;
+
 /* @deprecated: wrong layout (the reply has no offset field; reading it
  * returned PSK bytes). Use goodix_parse_preset_psk_read(). */
 typedef struct __attribute__((__packed__)) _GoodixPresetPskResp {

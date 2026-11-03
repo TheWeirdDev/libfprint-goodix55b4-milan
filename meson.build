@@ -60,3 +60,13 @@ foreach t : ['goodixtls', 'goodix-proto', 'goodix55b4-calib',
   test(t, exe, env: test_env, protocol: 'tap',
        timeout: t == 'goodix55b4-dataset' ? 1800 : 30)
 endforeach
+
+# The command wrappers alone, against a recording goodix_send_protocol()
+# and stub adapters defined in the test (so not linked with the driver).
+exe = executable('test-goodix-cmd',
+  'tests/test-goodix-cmd.c', 'driver/goodix55b4/goodix_cmd.c',
+  c_args: goodix55b4_cflags + lf_inc + ['-Werror'],
+  dependencies: deps,
+  build_rpath: lf_build / 'libfprint',
+)
+test('goodix-cmd', exe, env: test_env, protocol: 'tap', timeout: 30)

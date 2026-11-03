@@ -1,7 +1,7 @@
 /*
  * Goodix 27c6:55b4 and 27c6:5584 driver for libfprint — native Milan matching
  *
- * Protocol layer: goodix.c / goodix_proto.c / goodixtls.c from the
+ * Protocol layer: goodix.c / goodix_cmd.c / goodix_proto.c / goodixtls.c from the
  * goodixtls55x4 driver. Matching: the native Milan engine (milan/, vendored
  * from goodix53x5, profile 9 / subtype 12 — same sensor die, chip 0x00220ca1).
  *
