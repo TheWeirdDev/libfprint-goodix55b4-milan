@@ -25,7 +25,7 @@ if command -v setarch > /dev/null && setarch "$(uname -m)" -R true 2> /dev/null;
 fi
 # Everything but the device layer, which needs libfprint internals.
 mapfile -t SRCS < <(cd "$DRV" && ls ./*.c milan/*.c milan/*/*.c |
-    grep -vE '^\./(goodix|goodix55b4|goodixtls)\.c$' | sed "s|^|$DRV/|")
+    grep -vE '^\./(goodix|goodix_cmd|goodix55b4|goodixtls)\.c$' | sed "s|^|$DRV/|")
 read -ra CFLAGS <<< "$(pkg-config --cflags glib-2.0 gio-2.0 gusb)"
 read -ra LIBS <<< "$(pkg-config --libs glib-2.0 gio-2.0 libdeflate)"
 # One compiler call per suite: several sources share a basename (mask.c,
