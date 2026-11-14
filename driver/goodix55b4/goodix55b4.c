@@ -272,7 +272,8 @@ act_check_fw (FpDevice *dev, gchar *firmware, gpointer ssm, GError *error)
       return;
     }
   fp_dbg ("firmware: %s", firmware);
-  if (!g_str_has_prefix (firmware, GOODIX55B4_FIRMWARE_PREFIX))
+  if (!g_str_has_prefix (firmware, GOODIX55B4_FIRMWARE_PREFIX) &&
+      !g_str_has_prefix (firmware, GOODIX55B4_FIRMWARE_PREFIX_GF3208))
     {
       fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
                              FP_DEVICE_ERROR_NOT_SUPPORTED,
