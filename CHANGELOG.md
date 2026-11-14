@@ -3,6 +3,16 @@
 Versions are `<libfprint version>.m<n>`; each `v…` tag is built and published
 as a GitHub release with its section below as the release notes.
 
+## v1.94.100.m6 - 2026-11-14
+
+- Sensors whose firmware is named `GF3208_RTSEC_APP_*` (e.g.
+  `GF3208_RTSEC_APP_10042`, seen on a Lenovo IdeaPad Flex-15IWL) are no
+  longer rejected with "Unsupported firmware". The chip-ID check still
+  guards the die. Thanks to @kwollaston (#6).
+- README: documents the GF3208 firmware name and the report that the
+  zero-PSK write was accepted on 10042 (single report, untested here).
+- Internal: the firmware-name check is a separate function with unit tests.
+
 ## v1.94.100.m5 - 2026-11-03
 
 - New package for Fedora 45.

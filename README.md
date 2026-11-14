@@ -134,7 +134,10 @@ Prints from other 55b4 drivers are not compatible. Delete them and re-enroll.
 The driver talks to the sensor with the all-zero pre-shared key (PSK) and
 refuses to start otherwise. Sensors that were last used with the Windows
 driver hold a sealed random PSK. Writing the zero PSK needs firmware that
-allows PSK rewrite (`GF3268_RTSEC_APP_10041`). **This overwrites the
+allows PSK rewrite (`GF3268_RTSEC_APP_10041`). Some units name their firmware
+`GF3208_RTSEC_APP_*` instead (same chip, e.g. `GF3208_RTSEC_APP_10042`); the
+driver accepts both names. One user reported that the zero-PSK write was also
+accepted on 10042; this is a single report, not a tested guarantee. **This overwrites the
 sensor's existing PSK, so Windows will no longer pair with it.**
 
     sudo systemctl stop fprintd
