@@ -20,6 +20,8 @@
 
 /* Device identity */
 #define GOODIX55B4_FIRMWARE_PREFIX "GF3268_RTSEC_APP_"
+/* Some units name the same firmware GF3208 (chip ID unchanged). */
+#define GOODIX55B4_FIRMWARE_PREFIX_GF3208 "GF3208_RTSEC_APP_"
 #define GOODIX55B4_PSK_FLAGS (0xbb020007)
 #define GOODIX55B4_RESET_NUMBER (1024)
 /* Chip-ID register 0, decoded b0*0x100 + b1 + b2*0x1000000 + b3*0x10000.
