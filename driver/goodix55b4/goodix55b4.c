@@ -53,6 +53,10 @@ struct _FpiDeviceGoodix55b4
   guint              rearms;
   guint              clear_tries;
   gboolean           usb_reset_tried; /* during the current open */
+  FpiSsm            *act_ssm;         /* running activation, or NULL */
+  GSource           *act_watchdog;    /* bounds one activation attempt */
+  FpiSsm            *close_ssm;       /* running close, or NULL */
+  GSource           *close_watchdog;  /* bounds the close */
   FpiSsm            *scan_ssm;
   GSource           *up_watchdog;
   gboolean           up_forced;  /* the watchdog re-armed this finger-up wait */
@@ -626,9 +630,55 @@ study_lookup (FpiDeviceGoodix55b4 *self, const char *key)
   return studied;
 }
 
+/* Upper bounds, so that no open or close can hang whatever the device
+ * does (a hung one keeps fprintd's claim forever). A healthy activation
+ * takes well under a second. */
+#define ACTIVATE_ATTEMPT_TIMEOUT_MS (5000)
+#define CLOSE_TIMEOUT_MS (3000)
+
 static void activate_complete (FpiSsm  *ssm,
                                FpDevice *dev,
                                GError   *error);
+
+/* Fails the running state machine with a timeout. Whatever command it is
+ * waiting for is dropped first, so no late callback reaches the failed
+ * machine. */
+static void
+fail_ssm_timed_out (FpDevice *dev, FpiSsm *ssm, const char *what)
+{
+  if (!ssm)
+    return;
+  fp_warn ("%s did not finish in time; aborting it", what);
+  goodix_abort_command (dev);
+  fpi_ssm_mark_failed (ssm, g_error_new (G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
+                                         "%s timed out", what));
+}
+
+static void
+activate_watchdog_cb (FpDevice *dev, gpointer user_data)
+{
+  FpiDeviceGoodix55b4 *self = FPI_DEVICE_GOODIX55B4 (dev);
+
+  /* The source is being dispatched and goes away on return. */
+  self->act_watchdog = NULL;
+  fail_ssm_timed_out (dev, self->act_ssm, "Activation");
+}
+
+static void
+activate_start (FpDevice *dev)
+{
+  FpiDeviceGoodix55b4 *self = FPI_DEVICE_GOODIX55B4 (dev);
+
+  g_clear_pointer (&self->act_watchdog, g_source_destroy);
+  self->act_ssm = fpi_ssm_new (dev, activate_run_state, ACT_NUM_STATES);
+  self->act_watchdog = fpi_device_add_timeout (
+    dev, ACTIVATE_ATTEMPT_TIMEOUT_MS, activate_watchdog_cb, NULL, NULL);
+  /* fpi_device_add_timeout() counts from the main loop's cached time;
+   * see goodix_send_protocol_full(). */
+  g_source_set_ready_time (self->act_watchdog, g_get_monotonic_time () +
+                           (gint64) ACTIVATE_ATTEMPT_TIMEOUT_MS * 1000);
+  fpi_ssm_start (self->act_ssm, activate_complete);
+}
 
 static gboolean
 is_timeout_error (GError *error)
@@ -666,8 +716,7 @@ activate_retry_after_usb_reset (FpDevice *dev, GError *error)
       return FALSE;
     }
 
-  fpi_ssm_start (fpi_ssm_new (dev, activate_run_state, ACT_NUM_STATES),
-                 activate_complete);
+  activate_start (dev);
   return TRUE;
 }
 
@@ -676,6 +725,8 @@ activate_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
   FpiDeviceGoodix55b4 *self = FPI_DEVICE_GOODIX55B4 (dev);
 
+  g_clear_pointer (&self->act_watchdog, g_source_destroy);
+  self->act_ssm = NULL;
   if (activate_retry_after_usb_reset (dev, error))
     {
       g_error_free (error);
@@ -714,8 +765,7 @@ dev_open (FpDevice *dev)
   self->clear_tries = 0;
   self->bad_images = 0;
   self->usb_reset_tried = FALSE;
-  fpi_ssm_start (fpi_ssm_new (dev, activate_run_state, ACT_NUM_STATES),
-                 activate_complete);
+  activate_start (dev);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1509,6 +1559,10 @@ close_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
   FpiDeviceGoodix55b4 *self = FPI_DEVICE_GOODIX55B4 (dev);
   GError *deinit_error = NULL;
 
+  g_clear_pointer (&self->close_watchdog, g_source_destroy);
+  self->close_ssm = NULL;
+  if (error)
+    fp_warn ("close: %s", error->message);
   g_clear_error (&error);
   /* Waits for a write in progress (milliseconds), so fprintd exiting after
    * close never loses the last state. */
@@ -1528,10 +1582,27 @@ close_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
 }
 
 static void
+close_watchdog_cb (FpDevice *dev, gpointer user_data)
+{
+  FpiDeviceGoodix55b4 *self = FPI_DEVICE_GOODIX55B4 (dev);
+
+  self->close_watchdog = NULL;
+  /* close_complete() ignores the error and finishes the close anyway. */
+  fail_ssm_timed_out (dev, self->close_ssm, "Close");
+}
+
+static void
 dev_close (FpDevice *dev)
 {
-  fpi_ssm_start (fpi_ssm_new (dev, close_run_state, CLOSE_NUM_STATES),
-                 close_complete);
+  FpiDeviceGoodix55b4 *self = FPI_DEVICE_GOODIX55B4 (dev);
+
+  g_clear_pointer (&self->close_watchdog, g_source_destroy);
+  self->close_ssm = fpi_ssm_new (dev, close_run_state, CLOSE_NUM_STATES);
+  self->close_watchdog = fpi_device_add_timeout (
+    dev, CLOSE_TIMEOUT_MS, close_watchdog_cb, NULL, NULL);
+  g_source_set_ready_time (self->close_watchdog, g_get_monotonic_time () +
+                           (gint64) CLOSE_TIMEOUT_MS * 1000);
+  fpi_ssm_start (self->close_ssm, close_complete);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1566,6 +1637,8 @@ dev_finalize (GObject *object)
 {
   FpiDeviceGoodix55b4 *self = FPI_DEVICE_GOODIX55B4 (object);
 
+  g_clear_pointer (&self->act_watchdog, g_source_destroy);
+  g_clear_pointer (&self->close_watchdog, g_source_destroy);
   g_clear_pointer (&self->setup, g_free);
   g_clear_pointer (&self->frame, g_free);
   g_clear_pointer (&self->saver, goodix55b4_state_saver_free);
