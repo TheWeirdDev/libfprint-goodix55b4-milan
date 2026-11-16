@@ -3,6 +3,16 @@
 Versions are `<libfprint version>.m<n>`; each `v…` tag is built and published
 as a GitHub release with its section below as the release notes.
 
+## v1.94.100.m7 - 2026-11-16
+
+- Open and close can no longer hang. Each activation attempt is bounded to
+  5 s: on expiry the pending command is dropped, the USB device is reset and
+  activation retried once; if that also stalls, the open fails with an error
+  and the claim is released. Close is bounded to 3 s and always completes.
+  Fixes fprintd keeping the device claimed forever (every later unlock
+  failing with "Device was already claimed") when the sensor stopped
+  answering at open, e.g. after a long suspend.
+
 ## v1.94.100.m6 - 2026-11-14
 
 - Sensors whose firmware is named `GF3208_RTSEC_APP_*` (e.g.
