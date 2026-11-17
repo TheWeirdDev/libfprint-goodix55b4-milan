@@ -20,6 +20,7 @@
 #include "goodix_proto.h"
 #include "goodix55b4.h"
 #include "goodix55b4-calib.h"
+#include "goodix55b4-secrets.h"
 #include "goodix55b4-enroll.h"
 #include "goodix55b4-state.h"
 #include "goodix55b4-study.h"
@@ -297,12 +298,20 @@ act_check_psk (FpDevice *dev, gboolean success, guint32 flags, guint8 *psk,
     }
   if (!success || flags != GOODIX55B4_PSK_FLAGS ||
       length != sizeof (goodix55b4_zero_psk_hash) ||
-      memcmp (psk, goodix55b4_zero_psk_hash, length) != 0)
+      memcmp (psk, goodix55b4_psk_hash (), length) != 0)
     {
-      fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
-                             FP_DEVICE_ERROR_NOT_SUPPORTED,
-                             "Sensor is not provisioned with the zero PSK "
-                             "(flags 0x%08x); provision it first", flags));
+      if (goodix55b4_psk_is_custom ())
+        fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
+                               FP_DEVICE_ERROR_NOT_SUPPORTED,
+                               "Sensor PSK hash does not match the key file "
+                               "(flags 0x%08x); the file may be for another "
+                               "sensor, or Windows re-paired this one", flags));
+      else
+        fpi_ssm_mark_failed (ssm, fpi_device_error_new_msg (
+                               FP_DEVICE_ERROR_NOT_SUPPORTED,
+                               "Sensor is not provisioned with the zero PSK "
+                               "(flags 0x%08x); provision it or supply a key "
+                               "file", flags));
       return;
     }
   fpi_ssm_next_state (ssm);

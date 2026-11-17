@@ -27,6 +27,7 @@
 #include "fp-device.h"
 #include "fpi-log.h"
 #include "goodixtls.h"
+#include "goodix55b4-secrets.h"
 
 /* Was an SSL_accept() thread on a socketpair: the main loop blocked in
  * read() on it during the handshake (forever if the handshake failed), and
@@ -70,7 +71,7 @@ psk_server_callback (SSL           *ssl,
       fp_warn ("PSK buffer too small (%u bytes)", max_psk_len);
       return 0;
     }
-  memset (psk, 0, GOODIX_TLS_PSK_LENGTH);
+  memcpy (psk, goodix55b4_psk (), GOODIX_TLS_PSK_LENGTH);
   return GOODIX_TLS_PSK_LENGTH;
 }
 
