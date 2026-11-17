@@ -148,6 +148,39 @@ sensor's existing PSK, so Windows will no longer pair with it.**
 Requires `python-pyusb` and `python-cryptography`. The script is the same
 tool used to record the evaluation dataset.
 
+### Alternative: keep the Windows PSK (no reprovisioning)
+
+Instead of writing the zero PSK, the driver can use the random PSK the
+Windows driver already paired the sensor with. Nothing on the sensor
+changes, so it keeps working in both Windows and Linux (handy when
+dual-booting). This is opt-in; without a key file the driver uses the zero
+PSK exactly as above.
+
+Windows stores its PSK on the sensor, sealed with DPAPI. `recover_windows_psk.py`
+reads it from the sensor and unseals it offline from the files of the Windows
+installation that paired the sensor, then writes `/etc/goodix55b4/psk.hex`.
+Windows does not have to run, and nothing is written to the sensor or to
+Windows:
+
+    sudo systemctl stop fprintd
+    sudo mount -o ro /dev/nvme0n1p3 /mnt/win   # your Windows partition
+    sudo python3 tools/recover_windows_psk.py --windows /mnt/win
+    sudo umount /mnt/win
+    sudo systemctl start fprintd
+
+Requires `python-pyusb` and impacket (Arch: `impacket`, Debian/Fedora:
+`python3-impacket`). A BitLocker-encrypted Windows partition has to be
+unlocked first (for example with `dislocker` and the recovery key).
+
+The key file is two lines of hex: the 32-byte PSK, then its PMK hash (TLV
+`0xbb020007`). `GOODIX55B4_PSK_FILE` points the driver at another path. A
+missing or malformed file falls back to the zero PSK.
+
+> [!NOTE]
+> The recommended path remains the zero PSK above. If you dual-boot, Windows
+> may re-pair the sensor and change its PSK; run the script again if that
+> happens.
+
 ### Flashing firmware 10041
 
 The command above only works if the sensor already runs
