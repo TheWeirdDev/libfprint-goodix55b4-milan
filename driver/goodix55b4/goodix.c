@@ -32,6 +32,7 @@
 #include "goodix.h"
 #include "goodix_proto.h"
 #include "goodixtls.h"
+#include "goodix55b4-secrets.h"
 
 typedef struct
 {
@@ -1101,7 +1102,9 @@ goodix_tls (FpDevice *dev, GoodixNoneCallback callback, gpointer user_data)
                   FP_DEVICE_ERROR_GENERAL, "TLS session already started"));
       return;
     }
-  priv->tls_hop = goodix_tls_server_new (&error);
+  /* The zero PSK, or the Windows one from the key file. */
+  priv->tls_hop = goodix_tls_server_new_with_psk (goodix55b4_psk (),
+                                                  &error);
   if (!priv->tls_hop)
     {
       fp_err ("failed to init tls server: %s", error->message);

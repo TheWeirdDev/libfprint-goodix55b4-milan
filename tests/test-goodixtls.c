@@ -9,9 +9,11 @@
  */
 
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "fp-device.h"
 #include "goodixtls.h"
@@ -147,11 +149,11 @@ server_feed (GoodixTlsServer *s, GBytes *data, gsize chunk,
   return g_byte_array_free_to_bytes (g_steal_pointer (&out));
 }
 
+/* Completes a handshake between s (taken) and a device using a PSK of
+ * psk_fill bytes. */
 static GoodixTlsServer *
-connect_pair (Device *d, gsize chunk)
+connect_server (GoodixTlsServer *s, Device *d, gsize chunk, guint8 psk_fill)
 {
-  g_autoptr(GError) error = NULL;
-  GoodixTlsServer *s = goodix_tls_server_new (&error);
   g_autoptr(GBytes) hello = NULL;
   g_autoptr(GBytes) server_hello = NULL;
   g_autoptr(GBytes) client_flight = NULL;
@@ -159,9 +161,8 @@ connect_pair (Device *d, gsize chunk)
   g_autoptr(GBytes) rest = NULL;
   gboolean established, done;
 
-  g_assert_no_error (error);
   g_assert_nonnull (s);
-  device_init (d, 0x00);
+  device_init (d, psk_fill);
 
   hello = device_step (d, NULL, &done);
   g_assert_false (done);
@@ -182,6 +183,16 @@ connect_pair (Device *d, gsize chunk)
   g_assert_true (goodix_tls_server_is_established (s));
   g_assert_cmpstr (SSL_get_cipher_name (d->ssl), ==, "PSK-AES128-CBC-SHA256");
   return s;
+}
+
+static GoodixTlsServer *
+connect_pair (Device *d, gsize chunk)
+{
+  g_autoptr(GError) error = NULL;
+  GoodixTlsServer *s = goodix_tls_server_new (&error);
+
+  g_assert_no_error (error);
+  return connect_server (s, d, chunk, 0x00);
 }
 
 static guint8 *
@@ -325,6 +336,65 @@ test_wrong_psk (void)
   device_clear (&d);
 }
 
+/* A sensor that keeps its Windows pairing key: the server uses the PSK it
+ * was given, and only that one. */
+static void
+test_custom_psk (void)
+{
+  guint8 key[GOODIX_TLS_PSK_LENGTH];
+  g_autoptr(GError) error = NULL;
+  GoodixTlsServer *raw;
+  Device d;
+
+  memset (key, 0x41, sizeof (key));
+  raw = goodix_tls_server_new_with_psk (key, &error);
+  g_assert_no_error (error);
+  /* The server keeps its own copy. */
+  memset (key, 0x00, sizeof (key));
+  {
+    g_autoptr(GoodixTlsServer) s = connect_server (raw, &d, 0, 0x41);
+    check_roundtrip (s, &d, IMAGE_BYTES);
+    device_clear (&d);
+  }
+}
+
+static void
+test_custom_psk_rejects_zero (void)
+{
+  guint8 key[GOODIX_TLS_PSK_LENGTH];
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GoodixTlsServer) s = NULL;
+  g_autoptr(GBytes) hello = NULL;
+  g_autoptr(GBytes) server_hello = NULL;
+  g_autoptr(GBytes) flight = NULL;
+  g_autoptr(GBytes) alert = NULL;
+  gboolean established, done;
+  Device d;
+
+  memset (key, 0x41, sizeof (key));
+  s = goodix_tls_server_new_with_psk (key, &error);
+  g_assert_no_error (error);
+  device_init (&d, 0x00);
+  hello = device_step (&d, NULL, &done);
+  server_hello = server_feed (s, hello, 0, &established);
+  flight = device_step (&d, server_hello, &done);
+  g_assert_false (goodix_tls_server_handshake (
+    s, g_bytes_get_data (flight, NULL), g_bytes_get_size (flight), &alert,
+    &established, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO);
+  g_assert_false (goodix_tls_server_is_established (s));
+  device_clear (&d);
+}
+
+static void
+test_null_psk (void)
+{
+  g_autoptr(GError) error = NULL;
+
+  g_assert_null (goodix_tls_server_new_with_psk (NULL, &error));
+  g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL);
+}
+
 static void
 test_truncated_record (void)
 {
@@ -408,7 +478,23 @@ test_free_null (void)
 int
 main (int argc, char **argv)
 {
+  g_autoptr(GError) error = NULL;
+  g_autofree char *key_file = NULL;
+  int fd, ret;
+
   g_test_init (&argc, &argv, NULL);
+  /* The TLS layer uses only the PSK it is given, never the driver's key
+   * file: with a non-zero key file in place every zero-PSK test above must
+   * still pass, whatever /etc/goodix55b4/psk.hex holds on this machine. */
+  fd = g_file_open_tmp ("goodixtls-psk-XXXXXX", &key_file, &error);
+  g_assert_no_error (error);
+  close (fd);
+  g_file_set_contents (key_file,
+                       "4141414141414141414141414141414141414141414141414141414141414141\n"
+                       "4242424242424242424242424242424242424242424242424242424242424242\n",
+                       -1, &error);
+  g_assert_no_error (error);
+  g_setenv ("GOODIX55B4_PSK_FILE", key_file, TRUE);
   g_test_add_func ("/goodixtls/handshake-and-image", test_handshake_and_image);
   g_test_add_func ("/goodixtls/handshake-fragmented", test_handshake_fragmented);
   g_test_add_func ("/goodixtls/multi-record", test_multi_record);
@@ -417,9 +503,15 @@ main (int argc, char **argv)
                    test_decrypt_before_handshake);
   g_test_add_func ("/goodixtls/garbage-hello", test_garbage_hello);
   g_test_add_func ("/goodixtls/wrong-psk", test_wrong_psk);
+  g_test_add_func ("/goodixtls/custom-psk", test_custom_psk);
+  g_test_add_func ("/goodixtls/custom-psk-rejects-zero",
+                   test_custom_psk_rejects_zero);
+  g_test_add_func ("/goodixtls/null-psk", test_null_psk);
   g_test_add_func ("/goodixtls/truncated-record", test_truncated_record);
   g_test_add_func ("/goodixtls/corrupted-record", test_corrupted_record);
   g_test_add_func ("/goodixtls/free-null", test_free_null);
   g_test_add_func ("/goodixtls/cipher-restricted", test_cipher_restricted);
-  return g_test_run ();
+  ret = g_test_run ();
+  g_unlink (key_file);
+  return ret;
 }
