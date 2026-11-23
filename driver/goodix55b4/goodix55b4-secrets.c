@@ -11,18 +11,17 @@
 
 #define PSK_FILE_ENV "GOODIX55B4_PSK_FILE"
 #define PSK_FILE_DEFAULT "/etc/goodix55b4/psk.hex"
-#define PSK_LEN 32
 
 typedef struct
 {
-  guint8   psk[PSK_LEN];
-  guint8   hash[PSK_LEN];
+  guint8   psk[GOODIX55B4_PSK_LEN];
+  guint8   hash[GOODIX55B4_PSK_LEN];
   gboolean custom;
 } Goodix55b4Psk;
 
-/* Parse one 64-char hex line into exactly PSK_LEN bytes. */
+/* Parse one 64-char hex line into exactly GOODIX55B4_PSK_LEN bytes. */
 static gboolean
-parse_hex_line (const char *line, guint8 out[PSK_LEN])
+parse_hex_line (const char *line, guint8 out[GOODIX55B4_PSK_LEN])
 {
   gsize n = 0;
 
@@ -33,36 +32,80 @@ parse_hex_line (const char *line, guint8 out[PSK_LEN])
         continue;
       hi = g_ascii_xdigit_value (p[0]);
       lo = p[1] ? g_ascii_xdigit_value (p[1]) : -1;
-      if (hi < 0 || lo < 0 || n >= PSK_LEN)
+      if (hi < 0 || lo < 0 || n >= GOODIX55B4_PSK_LEN)
         return FALSE;
       out[n++] = (guint8) ((hi << 4) | lo);
       p++;
     }
-  return n == PSK_LEN;
+  return n == GOODIX55B4_PSK_LEN;
 }
 
-/* Load the key file into *psk. Returns FALSE (and sets *why) on any problem;
- * the caller then falls back to the zero PSK. */
-static gboolean
-load_psk_file (const char *path, Goodix55b4Psk *psk, GError **why)
+gboolean
+goodix55b4_psk_load_file (const char *path,
+                          guint8      psk[GOODIX55B4_PSK_LEN],
+                          guint8      hash[GOODIX55B4_PSK_LEN],
+                          GError    **error)
 {
   g_autofree char *contents = NULL;
   g_auto(GStrv) lines = NULL;
+  guint8 tmp_psk[GOODIX55B4_PSK_LEN];
+  guint8 tmp_hash[GOODIX55B4_PSK_LEN];
 
-  if (!g_file_get_contents (path, &contents, NULL, why))
+  g_return_val_if_fail (path != NULL, FALSE);
+  g_return_val_if_fail (psk != NULL && hash != NULL, FALSE);
+
+  if (!g_file_get_contents (path, &contents, NULL, error))
     return FALSE;
 
   lines = g_strsplit (contents, "\n", 3);
   if (g_strv_length (lines) < 2 ||
-      !parse_hex_line (lines[0], psk->psk) ||
-      !parse_hex_line (lines[1], psk->hash))
+      !parse_hex_line (lines[0], tmp_psk) ||
+      !parse_hex_line (lines[1], tmp_hash))
     {
-      g_set_error (why, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+      explicit_bzero (tmp_psk, sizeof (tmp_psk));
+      explicit_bzero (contents, strlen (contents));
+      g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_INVAL,
                    "expected two lines of 64 hex characters (PSK, then PMK "
                    "hash)");
       return FALSE;
     }
-  psk->custom = TRUE;
+  memcpy (psk, tmp_psk, sizeof (tmp_psk));
+  memcpy (hash, tmp_hash, sizeof (tmp_hash));
+  explicit_bzero (tmp_psk, sizeof (tmp_psk));
+  explicit_bzero (contents, strlen (contents));
+  return TRUE;
+}
+
+gboolean
+goodix55b4_psk_select (const char *path,
+                       gboolean    explicit_path,
+                       guint8      psk[GOODIX55B4_PSK_LEN],
+                       guint8      hash[GOODIX55B4_PSK_LEN])
+{
+  g_autoptr(GError) error = NULL;
+
+  g_return_val_if_fail (path != NULL, FALSE);
+  g_return_val_if_fail (psk != NULL && hash != NULL, FALSE);
+
+  memset (psk, 0, GOODIX55B4_PSK_LEN);
+  memcpy (hash, goodix55b4_zero_psk_hash, GOODIX55B4_PSK_LEN);
+
+  /* The default path is optional; an explicitly named one must load. */
+  if (!explicit_path && !g_file_test (path, G_FILE_TEST_EXISTS))
+    {
+      fp_dbg ("no PSK file at %s; using the zero PSK", path);
+      return FALSE;
+    }
+  if (!goodix55b4_psk_load_file (path, psk, hash, &error))
+    {
+      memset (psk, 0, GOODIX55B4_PSK_LEN);
+      memcpy (hash, goodix55b4_zero_psk_hash, GOODIX55B4_PSK_LEN);
+      fp_warn ("ignoring PSK file %s: %s; falling back to the zero PSK",
+               path, error->message);
+      return FALSE;
+    }
+  fp_info ("using the PSK from %s (the sensor keeps its Windows pairing "
+           "key)", path);
   return TRUE;
 }
 
@@ -75,31 +118,10 @@ get_psk (void)
   if (g_once_init_enter (&once))
     {
       const char *env = g_getenv (PSK_FILE_ENV);
-      const char *path = (env && *env) ? env : PSK_FILE_DEFAULT;
       gboolean explicit_path = env && *env;
 
-      memset (&psk, 0, sizeof (psk));
-      memcpy (psk.hash, goodix55b4_zero_psk_hash, PSK_LEN);
-
-      if (explicit_path || g_file_test (path, G_FILE_TEST_EXISTS))
-        {
-          g_autoptr(GError) error = NULL;
-          Goodix55b4Psk loaded;
-
-          memset (&loaded, 0, sizeof (loaded));
-          if (load_psk_file (path, &loaded, &error))
-            {
-              psk = loaded;
-              fp_info ("using the PSK from %s (the sensor keeps its Windows "
-                       "pairing key)", path);
-            }
-          else
-            {
-              fp_warn ("ignoring PSK file %s: %s; falling back to the zero "
-                       "PSK", path, error->message);
-            }
-        }
-
+      psk.custom = goodix55b4_psk_select (explicit_path ? env : PSK_FILE_DEFAULT,
+                                          explicit_path, psk.psk, psk.hash);
       g_once_init_leave (&once, 1);
     }
 

@@ -48,7 +48,7 @@ if dataset != ''
 endif
 
 foreach t : ['goodixtls', 'goodix-proto', 'goodix55b4-calib',
-             'goodix55b4-firmware',
+             'goodix55b4-firmware', 'goodix55b4-secrets',
              'goodix55b4-state', 'goodix55b4-study', 'goodix55b4-writer',
              'goodix55b4-dataset']
   exe = executable('test-' + t, 'tests/test-' + t + '.c',

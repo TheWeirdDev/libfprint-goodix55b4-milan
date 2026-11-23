@@ -20,6 +20,7 @@
 #define FP_COMPONENT "goodixtls"
 
 #include <limits.h>
+#include <openssl/crypto.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <string.h>
@@ -27,7 +28,6 @@
 #include "fp-device.h"
 #include "fpi-log.h"
 #include "goodixtls.h"
-#include "goodix55b4-secrets.h"
 
 /* Was an SSL_accept() thread on a socketpair: the main loop blocked in
  * read() on it during the handshake (forever if the handshake failed), and
@@ -40,6 +40,7 @@ struct _GoodixTlsServer
   BIO     *wbio;        /* engine -> device, owned by ssl */
   gboolean established;
   gboolean failed;      /* a fatal error happened; the session is unusable */
+  guint8   psk[GOODIX_TLS_PSK_LENGTH];
 };
 
 /* Takes the first queued OpenSSL error (the root cause) and clears the
@@ -66,20 +67,45 @@ psk_server_callback (SSL           *ssl,
                      unsigned char *psk,
                      unsigned int   max_psk_len)
 {
+  const GoodixTlsServer *self = SSL_get_app_data (ssl);
+
+  if (!self)
+    {
+      fp_warn ("PSK requested on a session without a server");
+      return 0;
+    }
   if (max_psk_len < GOODIX_TLS_PSK_LENGTH)
     {
       fp_warn ("PSK buffer too small (%u bytes)", max_psk_len);
       return 0;
     }
-  memcpy (psk, goodix55b4_psk (), GOODIX_TLS_PSK_LENGTH);
+  memcpy (psk, self->psk, GOODIX_TLS_PSK_LENGTH);
   return GOODIX_TLS_PSK_LENGTH;
 }
 
 GoodixTlsServer *
 goodix_tls_server_new (GError **error)
 {
-  g_autoptr(GoodixTlsServer) self = g_new0 (GoodixTlsServer, 1);
+  static const guint8 zero_psk[GOODIX_TLS_PSK_LENGTH] = { 0 };
+
+  return goodix_tls_server_new_with_psk (zero_psk, error);
+}
+
+GoodixTlsServer *
+goodix_tls_server_new_with_psk (const guint8 psk[GOODIX_TLS_PSK_LENGTH],
+                                GError     **error)
+{
+  g_autoptr(GoodixTlsServer) self = NULL;
   const char *ciphers;
+
+  if (!psk)
+    {
+      g_set_error_literal (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL,
+                           "TLS server created without a PSK");
+      return NULL;
+    }
+  self = g_new0 (GoodixTlsServer, 1);
+  memcpy (self->psk, psk, GOODIX_TLS_PSK_LENGTH);
 
   ERR_clear_error ();
   self->ctx = SSL_CTX_new (TLS_server_method ());
@@ -88,7 +114,7 @@ goodix_tls_server_new (GError **error)
       set_tls_error (error, "context creation", 0);
       return NULL;
     }
-  /* TLS 1.2 only, the device's PSK suite only, the all-zero PSK. */
+  /* TLS 1.2 only, the device's PSK suite only, the caller's PSK. */
   ciphers = g_getenv ("GOODIX55B4_TLS_CIPHERS");
   if (ciphers && *ciphers)
     fp_warn ("GOODIX55B4_TLS_CIPHERS=%s overrides %s", ciphers,
@@ -111,6 +137,7 @@ goodix_tls_server_new (GError **error)
       set_tls_error (error, "session creation", 0);
       return NULL;
     }
+  SSL_set_app_data (self->ssl, self);
   self->rbio = BIO_new (BIO_s_mem ());
   self->wbio = BIO_new (BIO_s_mem ());
   if (!self->rbio || !self->wbio)
@@ -138,6 +165,7 @@ goodix_tls_server_free (GoodixTlsServer *self)
    * one, and the session is dropped with the USB interface anyway. */
   SSL_free (self->ssl);
   SSL_CTX_free (self->ctx);
+  OPENSSL_cleanse (self->psk, sizeof (self->psk));
   g_free (self);
 }
 

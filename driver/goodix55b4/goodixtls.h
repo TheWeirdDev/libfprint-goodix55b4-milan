@@ -25,7 +25,8 @@
  * on memory BIOs: the caller moves the bytes between the device and the
  * engine, so nothing blocks and no thread or socket is involved. */
 
-/* The sensor is provisioned with the all-zero PSK. */
+/* PSK length. The sensor is provisioned with the all-zero PSK or keeps the
+ * random one Windows paired it with (see goodix55b4-secrets.h). */
 #define GOODIX_TLS_PSK_LENGTH (32)
 
 /* The suite the 55b4/5584 firmware negotiates (0x00AE). The server offered
@@ -35,7 +36,13 @@
 
 typedef struct _GoodixTlsServer GoodixTlsServer;
 
+/* A server using the all-zero PSK. */
 GoodixTlsServer *goodix_tls_server_new (GError **error);
+
+/* A server using the given PSK (GOODIX_TLS_PSK_LENGTH bytes, copied). */
+GoodixTlsServer *goodix_tls_server_new_with_psk (
+  const guint8 psk[GOODIX_TLS_PSK_LENGTH],
+  GError     **error);
 
 void goodix_tls_server_free (GoodixTlsServer *self);
 
