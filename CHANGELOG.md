@@ -3,6 +3,20 @@
 Versions are `<libfprint version>.m<n>`; each `v…` tag is built and published
 as a GitHub release with its section below as the release notes.
 
+## v1.94.100.m8 - 2026-11-23
+
+- Sensors paired by Windows can keep their Windows pairing key instead of
+  being reprovisioned with the zero PSK, so the same sensor keeps working in
+  both Windows and Linux when dual-booting. `tools/recover_windows_psk.py`
+  reads the sealed key from the sensor and unseals it offline from the
+  Windows partition (mounted read-only; nothing is written to the sensor or
+  to Windows), then writes `/etc/goodix55b4/psk.hex`, which the driver uses
+  when present (`GOODIX55B4_PSK_FILE` overrides the path). Opt-in: without
+  the file nothing changes, and the zero PSK remains the recommended setup.
+  See the README. Thanks @AugusDogus (#7).
+- The TLS layer receives the PSK from the driver instead of reading the key
+  file itself, and the key-file parser has its own test suite (#8).
+
 ## v1.94.100.m7 - 2026-11-16
 
 - Open and close can no longer hang. Each activation attempt is bounded to
